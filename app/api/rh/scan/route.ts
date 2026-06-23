@@ -19,6 +19,12 @@ interface MonthReport {
   previousScanDate?: string
 }
 
+interface PreviousScan {
+  scanDate: string
+  groups: MonthReport['groups']
+  totalFiles: number
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body: ScanRequest = await request.json()
@@ -119,7 +125,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function loadPreviousScan(year: string, month: string) {
+async function loadPreviousScan(year: string, month: string): Promise<PreviousScan | null> {
   try {
     // In production: read from file system RH/14/state/{year}/{month}.json
     // For demo: simulate with localStorage or return null

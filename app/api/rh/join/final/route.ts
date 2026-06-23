@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     const pdfBytes = await mergedPdf.save()
     console.log(`[v0] Final PDF created successfully for ${personName} - ${month} (Person first, then Base)`)
 
-    return new NextResponse(pdfBytes, {
+    return new NextResponse(Uint8Array.from(pdfBytes).buffer, {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',

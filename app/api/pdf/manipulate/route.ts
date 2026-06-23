@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
 
     const pdfBytes = await mergedPdf.save()
 
-    return new NextResponse(pdfBytes, {
+    return new NextResponse(Uint8Array.from(pdfBytes).buffer, {
       headers: {
         'Content-Type': 'application/pdf',
         'Content-Disposition': 'attachment; filename="manipulated.pdf"'

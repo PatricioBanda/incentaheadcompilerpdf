@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
 
     const mixedPdfBytes = await mixedPdf.save()
 
-    return new NextResponse(mixedPdfBytes, {
+    return new NextResponse(Uint8Array.from(mixedPdfBytes).buffer, {
       headers: {
         'Content-Type': 'application/pdf',
         'Content-Disposition': 'attachment; filename="mixed.pdf"',

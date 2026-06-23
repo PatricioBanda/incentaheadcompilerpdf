@@ -60,7 +60,7 @@ export async function POST(request: NextRequest) {
     }
 
     // For simplicity, return the first split PDF (in production, you'd create a ZIP)
-    return new NextResponse(splitPdfs[0], {
+    return new NextResponse(Uint8Array.from(splitPdfs[0]).buffer, {
       headers: {
         'Content-Type': 'application/pdf',
         'Content-Disposition': 'attachment; filename="split.pdf"',

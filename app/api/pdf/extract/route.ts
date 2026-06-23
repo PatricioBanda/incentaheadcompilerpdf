@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
 
     const extractedPdfBytes = await newPdf.save()
 
-    return new NextResponse(extractedPdfBytes, {
+    return new NextResponse(Uint8Array.from(extractedPdfBytes).buffer, {
       headers: {
         'Content-Type': 'application/pdf',
         'Content-Disposition': 'attachment; filename="extracted.pdf"',

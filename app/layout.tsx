@@ -1,16 +1,11 @@
 import type { Metadata } from 'next'
-import { Geist, Geist_Mono } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { Toaster } from '@/components/ui/toaster'
 import './globals.css'
 
-const _geist = Geist({ subsets: ["latin"] });
-const _geistMono = Geist_Mono({ subsets: ["latin"] });
-
 export const metadata: Metadata = {
-  title: 'RH Document Compiler - Organize e Compile PDFs',
-  description: 'Sistema de compilação de documentos PDF para RH, investimentos e gestão documental',
-  generator: 'v0.app',
+  title: 'SmartComprovante',
+  description: 'Classificação, revisão e compilação mensal de comprovativos',
   icons: {
     icon: [
       {
@@ -36,7 +31,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="pt">
+    <html lang="pt-PT">
       <body className={`font-sans antialiased`}>
         {children}
         <Toaster />

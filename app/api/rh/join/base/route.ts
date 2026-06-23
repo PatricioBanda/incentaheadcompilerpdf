@@ -116,7 +116,7 @@ export async function POST(request: NextRequest) {
 
     console.log('[v0] API: Sending PDF:', filename)
 
-    return new NextResponse(pdfBytes, {
+    return new NextResponse(Uint8Array.from(pdfBytes).buffer, {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',

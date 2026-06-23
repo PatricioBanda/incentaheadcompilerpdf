@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
     const pdfBytes = await mergedPdf.save()
 
     // Return the merged PDF as a response
-    return new NextResponse(pdfBytes, {
+    return new NextResponse(Uint8Array.from(pdfBytes).buffer, {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
