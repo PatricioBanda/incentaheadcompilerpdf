@@ -124,3 +124,108 @@ export interface CompanyRules {
     change_reason: string
   }
 }
+
+// Batch & document processing
+export interface ClassifiedDocument {
+  id: string
+  sourceHash: string
+  filename: string
+  mimeType: string
+  folderNumber: number
+  folderCode: string
+  documentType: string
+  confidence: number
+  pageCount: number
+  employeeCode?: string
+  employeeName?: string
+  period?: { year: number; month: number }
+  classificationReason: string
+  ruleName?: string
+  cacheHit: boolean
+  classifiedAt: string
+}
+
+export interface DocumentBatch {
+  id: string
+  companyId: string
+  year: number
+  month: number
+  createdAt: string
+  processedAt?: string
+  status: 'pending' | 'processing' | 'completed' | 'failed'
+  documents: ClassifiedDocument[]
+  totalPages: number
+  approvedCount: number
+  reviewCount: number
+  failedCount: number
+}
+
+// Export & audit
+export interface AuditManifest {
+  id: string
+  batchId: string
+  companyId: string
+  year: number
+  month: number
+  generatedAt: string
+  provider: ProviderId
+  totalInputPages: number
+  classifiedPages: number
+  reviewedPages: number
+  approvedPages: number
+  discardedPages: number
+  accuracy: {
+    classificationAccuracy: number
+    groupingAccuracy: number
+  }
+  metrics: {
+    totalTokensUsed: number
+    cacheHitRate: number
+    ruleHitRate: number
+    averageLatencyMs: number
+    estimatedCost: number
+  }
+  documents: Array<{
+    sourceHash: string
+    filename: string
+    classification: string
+    status: 'approved' | 'review' | 'discarded'
+  }>
+}
+
+export interface ExportBundle {
+  id: string
+  batchId: string
+  filename: string
+  timestamp: string
+  companyId: string
+  year: number
+  month: number
+  format: 'pdf' | 'pdf_with_manifest'
+  pageCount: number
+  size: number
+  auditManifest?: AuditManifest
+}
+
+// Tracking & analytics
+export interface ProviderCallRecord {
+  id: string
+  batchId: string
+  providerId: ProviderId
+  documentType: string
+  status: 'success' | 'cached' | 'failed'
+  inputTokens: number
+  outputTokens: number
+  latencyMs: number
+  cost: number
+  timestamp: string
+}
+
+export interface CacheEntry {
+  sourceHash: string
+  documentCode: string
+  confidence: number
+  timestamp: string
+  hitCount: number
+  employeeCode?: string
+}

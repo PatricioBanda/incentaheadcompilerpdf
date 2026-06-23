@@ -97,7 +97,7 @@ For a new company or unfamiliar document family, reference onboarding precedes m
 1. The operator selects a Program, Project, Company, and Year, creating or opening the Company Year Workspace.
 2. The application shows the 12 months for that year with status indicators for pending folder 0 files, review, Base Join, and Comprovantes Finais.
 3. The operator selects one month, multiple months, or all months to classify/review/generate. The active month opens as a Monthly Company Workspace.
-4. The operator places all unsorted Recursos Humanos documents in that company's/year/month folder `0. A Classificar` and creates a batch.
+4. The operator places all unsorted Recursos Humanos documents in that company's/year folder `0. A Classificar` and creates a batch.
 5. The operator uses local Ollama by default, or selects an explicitly enabled cloud provider, and imports mixed PDFs, PNGs, and JPEGs from folder 0.
 6. The application validates the files and slices PDFs into page-level assets.
 7. The application extracts embedded PDF text locally.
@@ -142,8 +142,8 @@ Password-protected, corrupt, unsupported, or zero-page files must be rejected wi
 
 For each approved composite key, the application creates:
 
-- `{normalized_entity_name} - {YYYY-MM}.pdf`;
-- `{normalized_entity_name} - {YYYY-MM}.manifest.json`;
+- `{DOC}_{YYYYMM}[_{ENTITY}][_{SEQ}].pdf` (e.g. `BJ_202601.pdf` or `CF_202601_E0042.pdf` as detailed in section 7.15);
+- `{DOC}_{YYYYMM}[_{ENTITY}][_{SEQ}].manifest.json`;
 - an entry in the batch-level usage and cost report.
 
 The manifest must contain source file/page provenance, final page order, classification metadata, confidence, manual changes, timestamps, provider/model, and content hashes.
@@ -268,7 +268,7 @@ Concurrency requirements:
 - Each queue item stores its stage, status, started/finished timestamps, attempt count, error category, and resumable dependency keys.
 - A failed stage resumes from the next incomplete work item for that stage. Completed ingestion, extraction, OCR, local feature extraction, rule matching, provider calls, and assembly steps must not be repeated unless an invalidating version changes.
 
-Performance targets for the prototype reference hardware:
+Performance targets for the prototype reference hardware (defined as: CPU Intel Core i7 12th Gen or AMD Ryzen 7, 16 GB DDR4 RAM, PCIe NVMe SSD, optional NVIDIA RTX 3060 6GB GPU for local model acceleration; CPU-only execution is supported but targets may degrade by up to 2x for local inference/OCR operations):
 
 | Operation | Target |
 |---|---:|
@@ -344,7 +344,7 @@ Every logical document has a `document_domain` of `RECURSOS_HUMANOS`, `INVESTIME
 | 7 | `INV_ORCAMENTO` | Supplier quotation or budget supporting the investment. |
 | 8 | `INV_FATURA_NAO_PAGA` | Invoice that has not yet been paid. |
 
-`UNKNOWN` is the fallback type for either domain. The earlier generic categories may be accepted during migration, but they must be resolved to one canonical type before filing.
+`UNKNOWN` is the fallback type for either domain. The earlier generic categories may be accepted in source metadata during migration but cannot be filed as approved without resolving to a canonical type first.
 
 Heuristics provide hints and deterministic fallbacks; they do not bypass schema validation or confidence rules.
 
@@ -390,6 +390,8 @@ Validation rules:
 
 Corporate and employee NIFs are separate fields. They must never overwrite one another.
 
+When document-level classification is executed (e.g. sending a multi-page document prompt to an LLM), the returned document-level metadata (domain, type, target period, entity, NIFs) is mapped back to individual page-level schema objects for all pages belonging to that document. The first page is marked with `is_continuation_of_previous_page: false`, and all subsequent pages in the document are marked with `is_continuation_of_previous_page: true`. Every page retains its unique `page_id` and `page_index` within the source file.
+
 #### 7.4.1 Confidence model
 
 Provider confidence alone is not authoritative. The application must calculate a normalized final confidence score using the same formula for every provider and every deterministic path.
@@ -429,10 +431,9 @@ Where:
 
 Decision thresholds:
 
-- `final_confidence >= 0.90` and no blocking validation errors: eligible for automatic approval only if policy allows that category and dependency state.
-- `0.75 <= final_confidence < 0.90`: classified but visible for spot-check or guided approval in early learning mode.
-- `0.50 <= final_confidence < 0.75`: review required.
-- `< 0.50`, `UNKNOWN`, schema failure, missing required period/entity/type, or major conflict: review required and not eligible for automatic filing.
+- `final_confidence >= 0.90` and no blocking validation errors: eligible for automatic approval (no review needed, unless in guided learning mode).
+- `0.75 <= final_confidence < 0.90`: classified but visible for spot-check or guided approval (optionally in review inbox, but pre-approved unless rejected).
+- `final_confidence < 0.75`, `UNKNOWN`, schema failure, missing required period/entity/type, or major conflict: review required (enters review inbox and is not eligible for automatic filing).
 
 Every classification attempt must store each component score, adjustments, penalties, final confidence, and the decision threshold that was applied.
 
@@ -577,7 +578,7 @@ Initial MVP defaults:
     "category_examples": true,
     "deterministic_heuristics": true,
     "local_ocr": true,
-    "local_ollama": false,
+    "local_ollama": true,
     "cloud_groq": false,
     "cloud_gemini": false,
     "human_review": true
@@ -660,7 +661,7 @@ Anomalies create review warnings with clear explanations and the affected docume
 
 ### 7.6 AI provider gateway
 
-- Use local Ollama as the default local provider through `http://127.0.0.1:11434`. Prefer a fast text-instruction model for OCR/extracted text classification, initially a hardware-appropriate Llama/Qwen text model. Use Qwen3-VL or another local vision model only when OCR/text is insufficient or visual layout is essential.
+- Use local Ollama as the default local provider through `http://127.0.0.1:11434`. Prefer a fast text-instruction model for OCR/extracted text classification, initially a hardware-appropriate Llama/Qwen text model. Use Qwen3-VL or another local vision model only when OCR/text is insufficient or visual layout is essential. For local Ollama vision calls, send the page image as a Base64-encoded string in the `images` field to the `/api/chat` or `/api/generate` endpoint.
 - Use Google Gemini as the approved cloud test/benchmark provider behind the same internal provider interface, initially with the configured `gemini-2.5-flash` model. Model names remain configuration because provider availability and free-tier terms can change.
 - Support Groq as a second cloud prototype provider through its OpenAI-compatible API, initially with the configurable `meta-llama/llama-4-scout-17b-16e-instruct` model when available. When both development keys exist, the prototype may prefer Groq only when the UI clearly displays the active provider.
 - The prototype UI and review screen must not display stale provider names. If Groq is the active provider, all badges, review messages, errors, audit rows, and activity text must say Groq; Gemini wording appears only when Gemini is actually configured and selected.
@@ -745,7 +746,7 @@ The system must also calculate an evidence-completeness checklist for each compa
 - A batched/card meal-allowance payment must include its detailed transfer/card-loading list.
 - For MVP evidence completeness, the expected employee roster for a company/month is inferred from approved folder 1 payslips. Each unique approved employee/NIF in folder 1 becomes an expected employee for employee-level checks and Comprovante Final generation.
 - The monthly IRS listing must cover all employees known for that company and month, where the MVP source of truth is the approved folder 1 payslip roster unless an operator imports or approves a separate employee roster for the month.
-- Later versions may support an external roster import/paste workflow. When present, the external roster becomes a cross-check against folder 1, and differences enter review rather than silently changing the expected employee list.
+- Later versions may support an external roster import/paste workflow. When present, the external roster becomes a cross-check against folder 1, and differences create review warnings to align the expected employee list rather than silently changing it.
 - If an approved external roster contains an employee with no approved folder 1 payslip, the system creates a `missing_payslip_for_roster_employee` warning. It blocks that employee's Comprovante Final but does not block other employees' Comprovantes Finais unless the operator marks the roster as mandatory for month closure.
 - If folder 1 contains an approved payslip for an employee absent from the external roster, the system creates an `unexpected_payslip_employee` review warning. The operator may add the employee to the month roster, approve an exception, or remove/reclassify the payslip.
 - If a folder 1 payslip exists but the employee is on leave, terminated, or otherwise should not receive a Comprovante Final, the operator must mark a roster exception with reason. The payslip remains auditable but is excluded from Final Join generation only by explicit approval.
@@ -756,7 +757,7 @@ The system must also calculate an evidence-completeness checklist for each compa
 
 A page or logical document enters review when:
 
-- confidence is below 0.75;
+- confidence is below 0.75 (or below 0.90 when in guided learning or spot-check mode);
 - type is `UNKNOWN`;
 - schema validation or JSON repair fails;
 - entity, target year, or target month is missing;

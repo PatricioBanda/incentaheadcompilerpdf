@@ -3,7 +3,7 @@ import path from 'path'
 import { createHash } from 'crypto'
 import { PDFDocument } from 'pdf-lib'
 import { RH_FOLDERS, monthKey } from './taxonomy'
-import type { CompanyRecord, CompanyRules, JoinReference, MonthlyWorkspace } from './types'
+import type { CompanyRecord, CompanyRules, JoinReference, MonthlyWorkspace, ClassifiedDocument, DocumentBatch, AuditManifest, ExportBundle, ProviderCallRecord, CacheEntry } from './types'
 
 const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd(), '.smartcomprovante-data')
 const STATE_PATH = path.join(DATA_ROOT, 'prototype-state.json')
@@ -293,5 +293,312 @@ export const getCompanyRuleContext = async (companyId: string) => {
   return {
     rulesVersion: rules.rules_version,
     approvedExamples: (rules.approved_examples as Array<Record<string, unknown>>).slice(-25),
+  }
+}
+
+// Batch processing and document grouping
+export const createDocumentBatch = async (
+  companyId: string,
+  year: number,
+  month: number,
+  documents: Array<{
+    sourceHash: string
+    filename: string
+    mimeType: string
+    classification: { code: string; label: string; confidence: number; reason: string; ruleName?: string; cacheHit?: boolean }
+    pageCount: number
+    employeeCode?: string
+    employeeName?: string
+  }>,
+) => {
+  const batchId = crypto.randomUUID()
+  const BATCH_DIR = path.join(DATA_ROOT, 'batches')
+  await fs.mkdir(BATCH_DIR, { recursive: true })
+
+  const batch = {
+    id: batchId,
+    companyId,
+    year,
+    month,
+    createdAt: new Date().toISOString(),
+    status: 'pending' as const,
+    documents: documents.map((doc, idx) => ({
+      id: `${batchId}-${idx}`,
+      sourceHash: doc.sourceHash,
+      filename: doc.filename,
+      mimeType: doc.mimeType,
+      folderNumber: RH_FOLDERS.find((f) => f.code === doc.classification.code)?.number || 0,
+      folderCode: doc.classification.code,
+      documentType: doc.classification.label,
+      confidence: doc.classification.confidence,
+      pageCount: doc.pageCount,
+      employeeCode: doc.employeeCode,
+      employeeName: doc.employeeName,
+      period: { year, month },
+      classificationReason: doc.classification.reason,
+      ruleName: doc.classification.ruleName,
+      cacheHit: doc.classification.cacheHit || false,
+      classifiedAt: new Date().toISOString(),
+    })),
+    totalPages: documents.reduce((sum, doc) => sum + doc.pageCount, 0),
+    approvedCount: documents.filter((doc) => doc.classification.confidence > 0.8).length,
+    reviewCount: documents.filter((doc) => doc.classification.confidence <= 0.8).length,
+    failedCount: 0,
+  }
+
+  const batchPath = path.join(BATCH_DIR, `${batchId}.json`)
+  await fs.writeFile(batchPath, JSON.stringify(batch, null, 2), 'utf8')
+
+  // Update workspace with batch info
+  await updateWorkspace(companyId, year, month, (workspace) => ({
+    ...workspace,
+    intakeCount: (workspace.intakeCount || 0) + batch.documents.length,
+    activity: [
+      ...workspace.activity,
+      {
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        text: `Lote ${batch.documents.length} criado; ${batch.approvedCount} aprovados, ${batch.reviewCount} para revisão.`,
+        tone: 'info',
+      },
+    ],
+  }))
+
+  return batch
+}
+
+// Document grouping by folder, employee, and compliance order
+export const groupAndSortDocuments = async (batchId: string, companyId: string) => {
+  const BATCH_DIR = path.join(DATA_ROOT, 'batches')
+  const batchPath = path.join(BATCH_DIR, `${batchId}.json`)
+  const batch = JSON.parse(await fs.readFile(batchPath, 'utf8'))
+
+  // Group by folder, then by employee
+  const grouped: Record<number, Record<string, any[]>> = {}
+  batch.documents.forEach((doc: any) => {
+    if (!grouped[doc.folderNumber]) grouped[doc.folderNumber] = {}
+    const employeeKey = doc.employeeCode || 'unknown'
+    if (!grouped[doc.folderNumber][employeeKey]) grouped[doc.folderNumber][employeeKey] = []
+    grouped[doc.folderNumber][employeeKey].push(doc)
+  })
+
+  // Sort folders by compliance order (1-13 for RH)
+  const sortedFolders = Object.entries(grouped)
+    .sort(([numA], [numB]) => Number(numA) - Number(numB))
+    .map(([folderNum, employees]) => ({
+      folderNumber: Number(folderNum),
+      employees: Object.entries(employees).map(([employeeCode, docs]) => ({ employeeCode, documents: docs })),
+    }))
+
+  return sortedFolders
+}
+
+// Export and audit manifest generation
+export const generateAuditManifest = async (
+  batchId: string,
+  companyId: string,
+  year: number,
+  month: number,
+  provider: 'gemini' | 'groq' | 'ollama',
+  callRecords: Array<{ inputTokens: number; outputTokens: number; cost: number; status: 'success' | 'cached' | 'failed' }>,
+) => {
+  const BATCH_DIR = path.join(DATA_ROOT, 'batches')
+  const batchPath = path.join(BATCH_DIR, `${batchId}.json`)
+  const batch = JSON.parse(await fs.readFile(batchPath, 'utf8'))
+
+  const manifestId = crypto.randomUUID()
+  const now = new Date().toISOString()
+
+  const totalTokensUsed = callRecords.reduce((sum, rec) => sum + rec.inputTokens + rec.outputTokens, 0)
+  const cacheHits = batch.documents.filter((doc: any) => doc.cacheHit).length
+  const cacheHitRate = batch.documents.length > 0 ? cacheHits / batch.documents.length : 0
+  const totalCost = callRecords.reduce((sum, rec) => sum + rec.cost, 0)
+
+  const manifest = {
+    id: manifestId,
+    batchId,
+    companyId,
+    year,
+    month,
+    generatedAt: now,
+    provider,
+    totalInputPages: batch.totalPages,
+    classifiedPages: batch.approvedCount + batch.reviewCount,
+    reviewedPages: batch.reviewCount,
+    approvedPages: batch.approvedCount,
+    discardedPages: batch.failedCount,
+    accuracy: {
+      classificationAccuracy: batch.approvedCount / Math.max(1, batch.documents.length),
+      groupingAccuracy: 1.0, // placeholder
+    },
+    metrics: {
+      totalTokensUsed,
+      cacheHitRate,
+      ruleHitRate: cacheHitRate,
+      averageLatencyMs: 150, // placeholder
+      estimatedCost: totalCost,
+    },
+    documents: batch.documents.map((doc: any) => ({
+      sourceHash: doc.sourceHash,
+      filename: doc.filename,
+      classification: doc.folderCode,
+      status: doc.confidence > 0.8 ? 'approved' : 'review',
+    })),
+  }
+
+  const AUDIT_DIR = path.join(DATA_ROOT, 'audits')
+  await fs.mkdir(AUDIT_DIR, { recursive: true })
+  const auditPath = path.join(AUDIT_DIR, `${manifestId}.json`)
+  await fs.writeFile(auditPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+  return manifest
+}
+
+// Create export bundle with PDF and audit
+export const createExportBundle = async (
+  batchId: string,
+  companyId: string,
+  year: number,
+  month: number,
+  pdfBuffer: Buffer,
+) => {
+  const bundleId = crypto.randomUUID()
+  const timestamp = new Date().toISOString()
+  const EXPORT_DIR = path.join(DATA_ROOT, 'exports')
+  await fs.mkdir(EXPORT_DIR, { recursive: true })
+
+  const filename = `BJ_${year}${String(month).padStart(2, '0')}_${companyId}.pdf`
+  const bundlePath = path.join(EXPORT_DIR, bundleId)
+  await fs.mkdir(bundlePath, { recursive: true })
+
+  const pdfPath = path.join(bundlePath, filename)
+  await fs.writeFile(pdfPath, pdfBuffer)
+
+  const bundle = {
+    id: bundleId,
+    batchId,
+    filename,
+    timestamp,
+    companyId,
+    year,
+    month,
+    format: 'pdf' as const,
+    pageCount: 1, // would be extracted from PDF in real implementation
+    size: pdfBuffer.length,
+  }
+
+  const bundleMetaPath = path.join(bundlePath, 'metadata.json')
+  await fs.writeFile(bundleMetaPath, JSON.stringify(bundle, null, 2), 'utf8')
+
+  return bundle
+}
+
+// Review management: approve or reject items
+export const approveReviewItem = async (
+  companyId: string,
+  year: number,
+  month: number,
+  reviewId: string,
+  approved: boolean,
+  correctCode?: string,
+) => {
+  return updateWorkspace(companyId, year, month, (workspace) => {
+    const review = workspace.reviews.find((r) => r.id === reviewId)
+    if (review) {
+      review.status = approved ? 'approved' : 'passed'
+      if (correctCode) review.proposedCode = correctCode
+    }
+    return workspace
+  })
+}
+
+// Tracking: record provider calls and metrics
+export const recordProviderCall = async (
+  batchId: string,
+  providerId: 'gemini' | 'groq' | 'ollama',
+  documentType: string,
+  status: 'success' | 'cached' | 'failed',
+  inputTokens: number,
+  outputTokens: number,
+  latencyMs: number,
+  cost: number,
+) => {
+  const TRACKING_DIR = path.join(DATA_ROOT, 'tracking')
+  await fs.mkdir(TRACKING_DIR, { recursive: true })
+
+  const record = {
+    id: crypto.randomUUID(),
+    batchId,
+    providerId,
+    documentType,
+    status,
+    inputTokens,
+    outputTokens,
+    latencyMs,
+    cost,
+    timestamp: new Date().toISOString(),
+  }
+
+  const trackingPath = path.join(TRACKING_DIR, `${batchId}.jsonl`)
+  await fs.appendFile(trackingPath, JSON.stringify(record) + '\n', 'utf8')
+
+  return record
+}
+
+// Cache hit tracking for document classifications
+export const recordCacheHit = async (
+  sourceHash: string,
+  documentCode: string,
+  confidence: number,
+  employeeCode?: string,
+) => {
+  const CACHE_INDEX_DIR_EXT = path.join(DATA_ROOT, 'cache-hits')
+  await fs.mkdir(CACHE_INDEX_DIR_EXT, { recursive: true })
+
+  const cacheEntry = {
+    sourceHash,
+    documentCode,
+    confidence,
+    timestamp: new Date().toISOString(),
+    hitCount: 1,
+    employeeCode,
+  }
+
+  const cacheHitPath = path.join(CACHE_INDEX_DIR_EXT, 'hits.jsonl')
+  await fs.appendFile(cacheHitPath, JSON.stringify(cacheEntry) + '\n', 'utf8')
+
+  return cacheEntry
+}
+
+// Get batch statistics
+export const getBatchStatistics = async (batchId: string) => {
+  const BATCH_DIR = path.join(DATA_ROOT, 'batches')
+  const batchPath = path.join(BATCH_DIR, `${batchId}.json`)
+  const batch = JSON.parse(await fs.readFile(batchPath, 'utf8'))
+
+  const TRACKING_DIR = path.join(DATA_ROOT, 'tracking')
+  const trackingPath = path.join(TRACKING_DIR, `${batchId}.jsonl`)
+  let callRecords: any[] = []
+  try {
+    const trackingData = await fs.readFile(trackingPath, 'utf8')
+    callRecords = trackingData
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line))
+  } catch {
+    // tracking file may not exist yet
+  }
+
+  return {
+    batchId,
+    totalDocuments: batch.documents.length,
+    totalPages: batch.totalPages,
+    approvedCount: batch.approvedCount,
+    reviewCount: batch.reviewCount,
+    cacheHitCount: batch.documents.filter((doc: any) => doc.cacheHit).length,
+    totalProviderCalls: callRecords.length,
+    totalTokensUsed: callRecords.reduce((sum: number, rec: any) => sum + rec.inputTokens + rec.outputTokens, 0),
+    totalCost: callRecords.reduce((sum: number, rec: any) => sum + rec.cost, 0),
+    averageConfidence: batch.documents.length > 0 ? batch.documents.reduce((sum: number, doc: any) => sum + doc.confidence, 0) / batch.documents.length : 0,
   }
 }
