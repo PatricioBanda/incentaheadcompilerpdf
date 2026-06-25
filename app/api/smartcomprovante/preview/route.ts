@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getCachedPreview } from '@/lib/smartcomprovante/store'
 
 export const runtime = 'nodejs'
+export const maxDuration = 120
 
 export async function GET(request: NextRequest) {
   try {

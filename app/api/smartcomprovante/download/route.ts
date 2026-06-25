@@ -1,31 +1,63 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
+import { promises as fs } from 'fs'
+import path from 'path'
 import { getWorkspace } from '@/lib/smartcomprovante/store'
 
 export const runtime = 'nodejs'
+export const maxDuration = 120
+
+const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd(), '.smartcomprovante-data')
+const EXPORTS_DIR = path.join(DATA_ROOT, 'exports')
 
 export async function GET(request: NextRequest) {
   const type = request.nextUrl.searchParams.get('type') === 'final' ? 'final' : 'base'
-  const employeeCode = request.nextUrl.searchParams.get('employee') || 'E0042'
-  const workspace = await getWorkspace()
+  const employeeCode = request.nextUrl.searchParams.get('employee') || ''
+  const companyId = request.nextUrl.searchParams.get('companyId') || 'agix'
+  const projectId = request.nextUrl.searchParams.get('projectId') || 'project-inovacao-01'
+  const year = Number(request.nextUrl.searchParams.get('year') || 2026)
+  const month = Number(request.nextUrl.searchParams.get('month') || 1)
+
+  const workspace = await getWorkspace(companyId, year, month, projectId)
+
+  if (type === 'base') {
+    if (workspace.baseJoin.status !== 'current') {
+      return NextResponse.json({ error: 'Base Join is not yet current. Generate it first.' }, { status: 409 })
+    }
+    const filename = workspace.baseJoin.filename
+    const filePath = path.join(EXPORTS_DIR, filename)
+    try {
+      const bytes = await fs.readFile(filePath)
+      return new NextResponse(bytes.buffer as ArrayBuffer, {
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'Cache-Control': 'no-store',
+        },
+      })
+    } catch {
+      return NextResponse.json({ error: 'Base Join PDF file not found on disk. Re-generate it.' }, { status: 404 })
+    }
+  }
+
   const employee = workspace.employees.find((item) => item.employeeCode === employeeCode)
-  const filename = type === 'base' ? workspace.baseJoin.filename : employee?.filename || `CF_202601_${employeeCode}.pdf`
-
-  if (type === 'base' && workspace.baseJoin.status !== 'current') return NextResponse.json({ error: 'Base Join ainda não está atual.' }, { status: 409 })
-  if (type === 'final' && employee?.finalStatus !== 'current') return NextResponse.json({ error: 'Comprovante Final ainda não está atual.' }, { status: 409 })
-
-  const pdf = await PDFDocument.create()
-  const page = pdf.addPage([595.28, 841.89])
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold)
-  const regular = await pdf.embedFont(StandardFonts.Helvetica)
-  page.drawText(type === 'base' ? 'BASE JOIN - PROTOTIPO' : 'COMPROVANTE FINAL - PROTOTIPO', { x: 54, y: 760, size: 18, font: bold, color: rgb(0.08, 0.35, 0.31) })
-  page.drawText(`${workspace.company.legalName} - NIF ${workspace.company.nif}`, { x: 54, y: 720, size: 12, font: regular })
-  page.drawText(`Periodo: ${String(workspace.month).padStart(2, '0')}/${workspace.year}`, { x: 54, y: 696, size: 12, font: regular })
-  if (type === 'final' && employee) page.drawText(`Colaborador: ${employee.employeeName} - ${employee.employeeCode}`, { x: 54, y: 672, size: 12, font: regular })
-  page.drawText('Este ficheiro demonstra o download e a convencao SharePoint-safe.', { x: 54, y: 620, size: 10, font: regular, color: rgb(0.35, 0.4, 0.43) })
-  page.drawText('Na implementacao real, as paginas aprovadas serao reconciliadas e unidas aqui.', { x: 54, y: 602, size: 10, font: regular, color: rgb(0.35, 0.4, 0.43) })
-
-  return new NextResponse(Uint8Array.from(await pdf.save()).buffer, {
-    headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${filename}"`, 'Cache-Control': 'no-store' },
-  })
+  if (!employee) {
+    return NextResponse.json({ error: `Employee ${employeeCode} not found.` }, { status: 404 })
+  }
+  if (employee.finalStatus !== 'current') {
+    return NextResponse.json({ error: 'Comprovante is not yet current. Generate finals first.' }, { status: 409 })
+  }
+  const filename = employee.filename
+  const filePath = path.join(EXPORTS_DIR, filename)
+  try {
+    const bytes = await fs.readFile(filePath)
+    return new NextResponse(bytes.buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'no-store',
+      },
+    })
+  } catch {
+    return NextResponse.json({ error: 'Comprovante PDF file not found on disk. Re-generate finals.' }, { status: 404 })
+  }
 }

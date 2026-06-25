@@ -17,4 +17,10 @@ package-lock.json
 pnpm-lock.yaml
 *.local
 .smartcomprovante-data/
+smartcomprovante-reports/
+tsconfig.tsbuildinfo
 .env.local
+.env.*.local
+*.env
+firebase-service-account*.json
+.claude/
