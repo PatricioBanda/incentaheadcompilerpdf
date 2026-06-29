@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { getWorkspace, listBaseJoins, listFinalJoins } from '@/lib/smartcomprovante/store'
+import { SMARTCOMPROVANTE_DATA_ROOT } from '@/lib/smartcomprovante/paths'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
 
-const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd(), '.smartcomprovante-data')
+const DATA_ROOT = SMARTCOMPROVANTE_DATA_ROOT
 const EXPORTS_DIR = path.join(DATA_ROOT, 'exports')
 
 export async function GET(request: NextRequest) {

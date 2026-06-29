@@ -1,8 +1,9 @@
 import { promises as fs } from 'fs'
 import path from 'path'
 import type { CustomerUpload, UploadStatus } from './upload-types'
+import { SMARTCOMPROVANTE_DATA_ROOT } from './paths'
 
-const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd(), '.smartcomprovante-data')
+const DATA_ROOT = SMARTCOMPROVANTE_DATA_ROOT
 const UPLOADS_ROOT = path.join(DATA_ROOT, 'uploads')
 
 const safeSegment = (v: string) => v.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'item'

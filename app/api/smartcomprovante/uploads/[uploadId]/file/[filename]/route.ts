@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { isFirebaseConfigured, storageRead } from '@/lib/smartcomprovante/firebase'
+import { SMARTCOMPROVANTE_DATA_ROOT } from '@/lib/smartcomprovante/paths'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
 
-const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd(), '.smartcomprovante-data')
+const DATA_ROOT = SMARTCOMPROVANTE_DATA_ROOT
 const UPLOADS_ROOT = path.join(DATA_ROOT, 'uploads')
 
 const safeSegment = (value: string) => value.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'item'

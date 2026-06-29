@@ -5,13 +5,14 @@ import { createHash, randomUUID } from 'crypto'
 import type { CustomerUpload, UploadedFile } from '@/lib/smartcomprovante/upload-types'
 import { isFirebaseConfigured, storageSave, storageRead, getStorage } from '@/lib/smartcomprovante/firebase'
 import { routeLogger } from '@/lib/smartcomprovante/logger'
+import { SMARTCOMPROVANTE_DATA_ROOT } from '@/lib/smartcomprovante/paths'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
 
 const log = routeLogger('uploads')
 
-const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd(), '.smartcomprovante-data')
+const DATA_ROOT = SMARTCOMPROVANTE_DATA_ROOT
 const UPLOADS_ROOT = path.join(DATA_ROOT, 'uploads')
 const allowedTypes = new Set(['application/pdf', 'image/jpeg', 'image/png'])
 const MAX_FILE_SIZE = 25 * 1024 * 1024
