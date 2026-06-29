@@ -9,10 +9,11 @@ import type { ApprovedDocument, BaseJoinValidation, CompanyDatabaseRecord, Compa
 import { isFirebaseConfigured, getFirebaseApp, firestoreGet, firestoreSet, firestoreDelete, firestoreList } from './firebase'
 import { listUploads } from './upload-store'
 import { logger } from './logger'
+import { SMARTCOMPROVANTE_DATA_ROOT } from './paths'
 
-// On Vercel set SMARTCOMPROVANTE_DATA_DIR=/tmp so ephemeral writes (cache, exports) go to writable /tmp.
+// On Vercel, the shared path helper defaults ephemeral writes to /tmp.
 // Workspace state and rules use Firestore when FIREBASE_PROJECT_ID is set.
-const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd(), '.smartcomprovante-data')
+const DATA_ROOT = SMARTCOMPROVANTE_DATA_ROOT
 const STATE_PATH = path.join(DATA_ROOT, 'prototype-state.json')
 const PROJECTS_PATH = path.join(DATA_ROOT, 'projects.json')
 const RULES_DIR = path.join(DATA_ROOT, 'rules', 'companies')

@@ -5,6 +5,7 @@ import { cacheIntakeFile, getCachedClassification, getCompanyRuleContext, saveCa
 import { localRouteDocument, storedClassificationToRoute } from '@/lib/smartcomprovante/routing'
 import { RH_FOLDERS } from '@/lib/smartcomprovante/taxonomy'
 import { updateUploadStatusByHash } from '@/lib/smartcomprovante/upload-store'
+import { SMARTCOMPROVANTE_DATA_ROOT } from '@/lib/smartcomprovante/paths'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -123,7 +124,7 @@ const buildFunnelTrace = (input: {
 }
 
 const writeClusterReport = async (report: Record<string, unknown>, markdown: string) => {
-  const reportsDir = path.join(process.cwd(), 'smartcomprovante-reports', 'clustering')
+  const reportsDir = path.join(SMARTCOMPROVANTE_DATA_ROOT, 'reports', 'clustering')
   await fs.mkdir(reportsDir, { recursive: true })
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const jsonPath = path.join(reportsDir, `cluster-${stamp}.json`)
