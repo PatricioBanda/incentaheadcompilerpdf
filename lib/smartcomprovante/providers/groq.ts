@@ -183,3 +183,31 @@ export async function analyzeGroqJoinReference(file: File, kind: 'base_join' | '
   ].join('\n')
   return normalizeGroqJoinReferenceAnalysis(await groqJson(file, instruction))
 }
+
+const periodDetectionSchema = z.object({
+  year: nullableInteger(2020, 2035),
+  month: nullableInteger(1, 12),
+  // The exact phrase from the document text that reveals the reference period.
+  // This phrase is auto-saved as a learned anchor so future rule-based detection catches it.
+  phrase: z.preprocess(
+    (value) => typeof value === 'string' && value.trim() ? value.trim().slice(0, 150) : null,
+    z.string().nullable(),
+  ),
+})
+
+export type GroqPeriodDetection = z.infer<typeof periodDetectionSchema>
+
+export async function detectPeriodWithGroq(file: File, documentCode: string, learnedPhrases?: string[]): Promise<GroqPeriodDetection> {
+  const anchorHint = learnedPhrases?.length
+    ? `Âncoras já aprendidas para este tipo de documento: ${learnedPhrases.slice(0, 5).join('; ')}.`
+    : null
+  const instruction = [
+    `Este é um documento de RH português do tipo ${documentCode}.`,
+    'Identifica o MÊS E ANO DE REFERÊNCIA (competência) — NÃO a data de pagamento.',
+    'Exemplos: "Subsidio Junho 2025" → month=6, year=2025. "Cartao Refeicao Junh-D46RP717 04-07-2025" → a data 04-07-2025 é pagamento; "Junh" indica Junho, logo month=6, year=2025.',
+    '"Período: 06/2025" → month=6, year=2025. "Vencimento Janeiro 2026" → month=1, year=2026.',
+    anchorHint,
+    'Devolve exatamente: year (inteiro ou null), month (inteiro 1-12 ou null), phrase (transcrição literal da parte do texto que indica o período — a frase mais curta possível; null se não encontrado).',
+  ].filter(Boolean).join('\n')
+  return periodDetectionSchema.parse(await groqJson(file, instruction))
+}

@@ -1,22 +1,19 @@
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+'use client'
+
+import { useEffect, useState } from 'react'
+import { Loader2 } from 'lucide-react'
 import { PrototypeDashboard } from '@/components/smartcomprovante/prototype-dashboard'
-import SmartComprovanteOverview from '@/components/smartcomprovante/dashboard'
 
 export default function HomePage() {
-  return (
-    <Tabs defaultValue="smartcomprovante" className="w-full">
-      <TabsList className="m-4">
-        <TabsTrigger value="smartcomprovante">SmartComprovante</TabsTrigger>
-        <TabsTrigger value="pdftools">PDF Tools</TabsTrigger>
-      </TabsList>
-      
-      <TabsContent value="smartcomprovante" className="m-0">
-        <SmartComprovanteOverview />
-      </TabsContent>
-      
-      <TabsContent value="pdftools" className="m-0">
-        <PrototypeDashboard />
-      </TabsContent>
-    </Tabs>
-  )
+  // This page is a fully interactive client app (Radix Tabs + heavy client dashboards).
+  // Rendering it client-only avoids SSR/client hydration mismatches in the auto-generated
+  // Radix `useId` attributes. The pre-mount markup is identical on server and client.
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => { setMounted(true) }, [])
+
+  if (!mounted) {
+    return <div className="flex min-h-screen items-center justify-center bg-slate-50"><Loader2 className="h-7 w-7 animate-spin text-teal-700" /></div>
+  }
+
+  return <PrototypeDashboard />
 }

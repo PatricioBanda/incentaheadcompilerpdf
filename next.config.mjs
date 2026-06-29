@@ -4,7 +4,14 @@ const nextConfig = {
     unoptimized: true,
   },
   output: 'standalone',
-  serverExternalPackages: ['pdfjs-dist'],
+  serverExternalPackages: ['pdfjs-dist', 'pino', 'pino-pretty', 'firebase-admin'],
+  outputFileTracingExcludes: {
+    '*': [
+      './.smartcomprovante-data/cache/**/*',
+      './.smartcomprovante-data/uploads/**/*',
+      './.smartcomprovante-data/reports/**/*',
+    ],
+  },
 }
 
 export default nextConfig

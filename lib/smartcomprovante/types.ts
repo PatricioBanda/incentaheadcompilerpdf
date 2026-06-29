@@ -59,6 +59,19 @@ export interface EmployeeDeliverable {
   finalStatus: JoinStatus
   filename: string
   pageCount: number | null
+  payslipHash?: string
+}
+
+export interface ApprovedDocument {
+  id: string
+  sourceHash: string
+  folderCode: string
+  folderNumber: number
+  filename: string
+  pageCount: number
+  confidence: number
+  approvedAt: string
+  approvedBy: 'auto' | 'operator'
 }
 
 export interface ActivityItem {
@@ -66,6 +79,81 @@ export interface ActivityItem {
   at: string
   text: string
   tone: 'info' | 'success' | 'warning'
+}
+
+export interface BaseJoinSectionCheck {
+  folderCode: string
+  folderNumber: number
+  label: string
+  found: boolean
+  actualPosition: number | null
+  expectedPosition: number
+  orderMatch: boolean
+  requiredTermsCount: number
+  optionalTermsCount: number
+  llmEnriched: boolean
+  validationScore: number
+}
+
+export interface BaseJoinValidation {
+  overallConfidence: number
+  coverageScore: number
+  orderAlignmentScore: number
+  sections: BaseJoinSectionCheck[]
+  missingRequired: string[]
+  unexpectedFound: string[]
+  fingerprintQuality: number
+  validatedAt: string
+}
+
+export type PeriodFormat = 'explicit_label' | 'named_month' | 'compact_yyyymm' | 'operation_date'
+
+// A point an operator clicked on the document where the date lives.
+// x/y are normalized 0..1 in pdf.js text space (origin bottom-left, y up).
+export interface PeriodMark {
+  page: number
+  x: number
+  y: number
+  dateText?: string
+  label?: string
+  contextText?: string
+}
+
+export interface PeriodSignal {
+  position: 'header' | 'footer' | 'body' | null
+  format: PeriodFormat | null
+  anchor_phrases: string[]
+  detection_rate: number
+  mark?: PeriodMark | null
+}
+
+export interface SectionEnrichment {
+  document_code: string
+  folder_number: number
+  label: string
+  page_numbers: number[]
+  page_count: number
+  date_position: 'header' | 'footer' | 'body' | null
+  section_order: number
+  header_terms: string[]
+  sample_tokens: string[]
+  tfidf_terms: string[]
+  ngrams: string[]
+  negative_terms: string[]
+  llm_descriptors: string[]
+  llm_enriched: boolean
+  period_signal?: PeriodSignal
+}
+
+export interface EnrichedSectionFingerprint extends SectionEnrichment {
+  required_terms: string[]
+  optional_terms: string[]
+  validation: {
+    recall: number
+    precision: number
+    coverage: number
+    rounds: number
+  }
 }
 
 export interface JoinReference {
@@ -76,6 +164,18 @@ export interface JoinReference {
   uploadedAt: string
   pageCount: number
   structuralSummary: string
+  learnedSections?: Array<{
+    document_code: string
+    folder_number: number
+    label: string
+    page_numbers: number[]
+    header_terms: string[]
+    sample_tokens: string[]
+    page_count: number
+    date_position: 'header' | 'footer' | 'body' | null
+    section_order: number
+  }>
+  enrichedSections?: SectionEnrichment[]
   temporaryCopyRetained: false
 }
 
@@ -95,10 +195,49 @@ export interface MonthlyWorkspace {
     includedFolders: number
     pageCount: number | null
     updatedAt: string | null
+    validation?: BaseJoinValidation
   }
   employees: EmployeeDeliverable[]
+  approvedDocuments: ApprovedDocument[]
   joinReferences?: JoinReference[]
   activity: ActivityItem[]
+}
+
+export interface MonthlyComprovanteRecord {
+  companyId: string
+  year: number
+  month: number
+  workspaceKey: string
+  baseJoin: {
+    filename: string
+    status: JoinStatus
+    pageCount: number | null
+    updatedAt: string | null
+  }
+  finalJoinFolder: {
+    employeeCount: number
+    currentCount: number
+    readyCount: number
+    blockedCount: number
+  }
+  evidenceFolderCount: number
+  reviewCount: number
+}
+
+export interface YearComprovanteRecord {
+  year: number
+  comprovantesRh: MonthlyComprovanteRecord[]
+}
+
+export interface CompanyDatabaseRecord {
+  company: CompanyRecord
+  years: YearComprovanteRecord[]
+}
+
+export interface SmartComprovanteDatabase {
+  schemaVersion: 'prototype-db-1.0'
+  projects: ProjectRecord[]
+  companies: CompanyDatabaseRecord[]
 }
 
 export interface CompanyRules {
@@ -118,6 +257,13 @@ export interface CompanyRules {
     employees: unknown[]
   }
   approved_examples: unknown[]
+  required_folders: string[]
+  optional_folders: string[]
+  folder_sequence: string[]
+  expected_page_counts: Record<string, number>
+  enriched_fingerprints?: EnrichedSectionFingerprint[]
+  fingerprint_trained_at?: string
+  fingerprint_quality?: number
   audit: {
     created_at: string
     created_by: string

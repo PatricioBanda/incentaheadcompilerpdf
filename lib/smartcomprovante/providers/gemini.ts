@@ -127,6 +127,69 @@ const joinReferenceResponseSchema = {
   },
 }
 
+const batchEnrichSchema = {
+  type: 'object',
+  required: ['sections'],
+  properties: {
+    sections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['document_code', 'descriptors'],
+        properties: {
+          document_code: { type: 'string' },
+          descriptors: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 100 } },
+        },
+      },
+    },
+  },
+}
+
+export async function batchEnrichSections(
+  sections: Array<{ document_code: string; label: string; sampleText: string }>,
+): Promise<Map<string, string[]>> {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey || sections.length === 0) return new Map()
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 60_000)
+  const sectionList = sections
+    .map((s, i) => `${i + 1}. ${s.document_code} (${s.label}):\n${s.sampleText.slice(0, 350)}`)
+    .join('\n\n')
+  try {
+    const response = await fetchGeminiRequest(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: [
+            'You are a classifier for Portuguese HR compliance documents.',
+            'For each section below, list exactly 5 short Portuguese phrases or keywords that would uniquely identify that document type.',
+            'Only include phrases that appear EXCLUSIVELY in that document type and NOT in other HR documents.',
+            'Return the document_code field exactly as given.',
+            '',
+            'Sections:',
+            sectionList,
+          ].join('\n') }] }],
+          generationConfig: { temperature: 0, responseMimeType: 'application/json', responseJsonSchema: batchEnrichSchema },
+        }),
+      },
+    )
+    if (!response.ok) return new Map()
+    const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }
+    const text = payload.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!text) return new Map()
+    const parsed = JSON.parse(text) as { sections: Array<{ document_code: string; descriptors: string[] }> }
+    return new Map(parsed.sections.map((s) => [s.document_code, s.descriptors.filter((d) => d.length > 0)]))
+  } catch {
+    return new Map()
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export async function analyzeGeminiJoinReference(file: File, kind: 'base_join' | 'final_join'): Promise<GeminiJoinReferenceAnalysis> {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) throw new GeminiProviderError('Gemini não está configurado. Adicione a chave em .env.local.', 409)
