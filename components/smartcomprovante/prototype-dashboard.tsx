@@ -7,7 +7,7 @@ import { buildDocumentDisplayCode } from '@/lib/smartcomprovante/upload-types'
 import { PdfDateMarker, type DateMark } from './pdf-date-marker'
 import {
   AlertTriangle, Archive, Bot, Building2, Check,
-  Clock3, Download, FileCheck2, FileStack, Folder, FolderInput, KeyRound, LayoutDashboard,
+  Clock3, Download, FileCheck2, FileStack, Folder, FolderCheck, FolderInput, KeyRound, LayoutDashboard,
   LayoutGrid, List, Loader2, LockKeyhole, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles, Tag, Upload, Users, X,
 } from 'lucide-react'
 
@@ -216,12 +216,25 @@ export function PrototypeDashboard() {
   const [trainingSteps, setTrainingSteps] = useState<TrainingStep[]>(initialTrainingSteps)
   const [selectedMonths, setSelectedMonths] = useState<number[]>([])
   const [selectedPeriodKeys, setSelectedPeriodKeys] = useState<string[]>([])
+  const [pendingDownloads, setPendingDownloads] = useState<Array<{ year: number; month: number; filename: string }>>([])
+  const [baseJoinLibrary, setBaseJoinLibrary] = useState<Array<{ filename: string; companyId: string; year: number; month: number; sizeBytes: number; generatedAt: string }>>([])
+  const [finalJoinLibrary, setFinalJoinLibrary] = useState<Array<{ filename: string; companyId: string; year: number; month: number; employeeCode: string; sizeBytes: number; generatedAt: string }>>([])
+  const [selectedBaseJoinFilename, setSelectedBaseJoinFilename] = useState<string | null>(null)
+  const [folder1Payslips, setFolder1Payslips] = useState<Array<{ filename: string; employeeName: string; uploadId: string; physicalFolderNumber: number; hash?: string }>>([])
+  const [folder1Loaded, setFolder1Loaded] = useState(false)
+  const [selectedPayslipFilenames, setSelectedPayslipFilenames] = useState<string[]>([])
+  const [generatingFinalFor, setGeneratingFinalFor] = useState<string | null>(null)
+  const [batchGeneratingFinals, setBatchGeneratingFinals] = useState(false)
+  const [previewBaseJoinFilename, setPreviewBaseJoinFilename] = useState<string | null>(null)
+  const [previewFinalJoinFilename, setPreviewFinalJoinFilename] = useState<string | null>(null)
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
   const [selectedYear, setSelectedYear] = useState<number | null>(null)
   const [internalActiveYear, setInternalActiveYear] = useState<number | null>(null)
   const [showNewYearInput, setShowNewYearInput] = useState(false)
   const [newYearEntry, setNewYearEntry] = useState('')
   const [sessionRestored, setSessionRestored] = useState(false)
   const [clusterViewMode, setClusterViewMode] = useState<'list' | 'matrix'>('matrix')
+  const [confirmClassificationStatus, setConfirmClassificationStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [localMonthClusters, setLocalMonthClusters] = useState<Record<string, LocalMonthClusterStatus>>({})
   const [candidateStates, setCandidateStates] = useState<Record<string, CandidateState>>({})
   const [reviewItem, setReviewItem] = useState<{ item: ClusterItem; clusterKey: string; allItems: ClusterItem[] } | null>(null)
@@ -352,6 +365,10 @@ export function PrototypeDashboard() {
     setAnchorSaveStatus('idle')
     setReviewScanStatus('idle')
     setReviewScanCandidates([])
+    setFolder1Loaded(false)
+    setFolder1Payslips([])
+    setSelectedPayslipFilenames([])
+    setPreviewFinalJoinFilename(null)
     setReviewManualPeriod(null)
     setReviewAnchorText('')
     setCustomerCell(null)
@@ -420,6 +437,8 @@ export function PrototypeDashboard() {
         }
         setWorkspace(resolvedWorkspace)
         setSelectedYear(resolvedWorkspace.year)
+        void loadBaseJoinLibrary(resolvedWorkspace.company.id)
+        void loadFinalJoinLibrary(resolvedWorkspace.company.id)
       } else {
         setWorkspace(null)
       }
@@ -441,8 +460,16 @@ export function PrototypeDashboard() {
   }, [workspace?.company.id, refreshCustomerUploads])
 
   useEffect(() => {
+    if (selectedBaseJoinFilename) return
+    setFolder1Loaded(false)
+    setFolder1Payslips([])
+    setSelectedPayslipFilenames([])
+    setPreviewFinalJoinFilename(null)
+  }, [selectedBaseJoinFilename])
+
+  useEffect(() => {
     if (!workspace || !customerSubmittedUploads.length) return
-    const directUploads = customerSubmittedUploads.filter((upload) => upload.folderNumber >= 0 && upload.folderNumber <= 13)
+    const directUploads = customerSubmittedUploads.filter((upload) => upload.status !== 'archived' && upload.folderNumber >= 0 && upload.folderNumber <= 13)
     if (!directUploads.length) return
     setClusterResult((current) => {
       const clusters = [...(current?.clusters || [])]
@@ -592,6 +619,8 @@ export function PrototypeDashboard() {
       setSelectedYear(ws.year)
       setSelectedProjectId(projectId)
       setView('workspace')
+      void loadBaseJoinLibrary(ws.company.id)
+      void loadFinalJoinLibrary(ws.company.id)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not open the selected company.')
     } finally {
@@ -611,6 +640,8 @@ export function PrototypeDashboard() {
       setWorkspace(nextWorkspace)
       setSelectedYear(nextWorkspace.year)
       setView('workspace')
+      void loadBaseJoinLibrary(nextWorkspace.company.id)
+      void loadFinalJoinLibrary(nextWorkspace.company.id)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not open the selected month.')
     } finally {
@@ -633,6 +664,29 @@ export function PrototypeDashboard() {
     if (!workspace) return []
     return selectedMonths.map((month) => ({ key: `${workspace.year}-${String(month).padStart(2, '0')}`, year: workspace.year, month, count: 0, groupedCount: 0 }))
   }, [detectedPeriods, selectedPeriodKeys, selectedMonths, workspace])
+  const finalJoinMonthGroups = useMemo(() => {
+    if (!workspace) return []
+    const groups = new Map<string, { key: string; year: number; month: number; label: string; items: typeof finalJoinLibrary }>()
+    for (const entry of finalJoinLibrary.filter((item) => item.companyId === workspace.company.id)) {
+      const key = `${entry.year}-${String(entry.month).padStart(2, '0')}`
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          year: entry.year,
+          month: entry.month,
+          label: `${monthNames[entry.month - 1]} ${entry.year}`,
+          items: [],
+        })
+      }
+      groups.get(key)!.items.push(entry)
+    }
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        items: group.items.slice().sort((left, right) => left.employeeCode.localeCompare(right.employeeCode)),
+      }))
+      .sort((left, right) => (right.year * 100 + right.month) - (left.year * 100 + left.month))
+  }, [finalJoinLibrary, workspace])
 
   const confirmIncompleteGeneration = (periods: typeof selectedPeriods) => {
     if (!workspace || !clusterResult) return true
@@ -656,22 +710,42 @@ export function PrototypeDashboard() {
     setSelectedPeriodKeys((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key].sort())
   }
 
-  const generateSelectedBaseJoins = async () => {
+  const generateSelectedBaseJoins = async (confirmMissing = false) => {
     if (!workspace || selectedPeriods.length === 0) return
-    if (!confirmIncompleteGeneration(selectedPeriods)) return
     setBusy('generate-selected-base')
     setError('')
     try {
       let currentWorkspace: MonthlyWorkspace | null = null
+      const readyDownloads: Array<{ year: number; month: number; filename: string }> = []
       for (const period of selectedPeriods) {
         const response = await fetch('/api/smartcomprovante/actions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'generate-base', companyId: workspace.company.id, projectId: selectedProjectId, year: period.year, month: period.month }),
+          body: JSON.stringify({ action: 'generate-base', companyId: workspace.company.id, projectId: selectedProjectId, year: period.year, month: period.month, confirmMissing }),
         })
         const result = await response.json()
+        // Confirmation gate: missing folders detected — show dialog and re-run if confirmed
+        if (response.status === 409 && result.requiresConfirmation) {
+          const missing = (result.missingFolders as Array<{ number: number; code: string; label: string }>) || []
+          const lines = missing.map((f) => `• ${String(f.number).padStart(2, '0')}_${f.code} — ${f.label}`).join('\n')
+          const confirmed = window.confirm(
+            `${missing.length} folder(s) are incomplete for ${monthNames[period.month - 1]} ${period.year}:\n\n${lines}\n\nGenerate the Base Join anyway with these folders marked as missing?`
+          )
+          if (!confirmed) {
+            setError(`Generation cancelled for ${monthNames[period.month - 1]} ${period.year} — complete the missing folders first or confirm to proceed.`)
+            return
+          }
+          // Re-run this period with confirmation
+          setBusy(null)
+          await generateSelectedBaseJoins(true)
+          return
+        }
         if (!response.ok) throw new Error(`${monthNames[period.month - 1]} ${period.year}: ${result.error || 'Base Join generation failed.'}`)
-        if (period.year === workspace.year && period.month === workspace.month) currentWorkspace = result as MonthlyWorkspace
+        const ws = result as MonthlyWorkspace
+        if (period.year === workspace.year && period.month === workspace.month) currentWorkspace = ws
+        if (ws.baseJoin?.status === 'current' && ws.baseJoin.filename) {
+          readyDownloads.push({ year: period.year, month: period.month, filename: ws.baseJoin.filename })
+        }
       }
       if (currentWorkspace) setWorkspace(currentWorkspace)
       setSelectedMonths([])
@@ -679,6 +753,14 @@ export function PrototypeDashboard() {
       for (const period of selectedPeriods) localStorage.removeItem(sessionKey(workspace.company.id, period.year, period.month))
       setSessionRestored(false)
       if (workspace) void refreshCustomerUploads(workspace.company.id)
+      // Refresh the library so newly generated files appear immediately
+      void loadBaseJoinLibrary(workspace.company.id)
+      // Trigger download: auto-download if single period, else queue for manual download
+      if (readyDownloads.length === 1) {
+        downloadBaseJoin(workspace.company.id, selectedProjectId, readyDownloads[0].year, readyDownloads[0].month, readyDownloads[0].filename)
+      } else if (readyDownloads.length > 1) {
+        setPendingDownloads(readyDownloads)
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Base Join generation failed.')
     } finally {
@@ -686,9 +768,8 @@ export function PrototypeDashboard() {
     }
   }
 
-  const generateSelectedBaseAndFinals = async () => {
+  const generateSelectedBaseAndFinals = async (confirmMissing = false) => {
     if (!workspace || selectedPeriods.length === 0) return
-    if (!confirmIncompleteGeneration(selectedPeriods)) return
     setBusy('generate-selected-all')
     setError('')
     try {
@@ -697,9 +778,23 @@ export function PrototypeDashboard() {
         const baseResponse = await fetch('/api/smartcomprovante/actions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'generate-base', companyId: workspace.company.id, projectId: selectedProjectId, year: period.year, month: period.month }),
+          body: JSON.stringify({ action: 'generate-base', companyId: workspace.company.id, projectId: selectedProjectId, year: period.year, month: period.month, confirmMissing }),
         })
         const baseResult = await baseResponse.json()
+        if (baseResponse.status === 409 && baseResult.requiresConfirmation) {
+          const missing = (baseResult.missingFolders as Array<{ number: number; code: string; label: string }>) || []
+          const lines = missing.map((f) => `• ${String(f.number).padStart(2, '0')}_${f.code} — ${f.label}`).join('\n')
+          const confirmed = window.confirm(
+            `${missing.length} folder(s) are incomplete for ${monthNames[period.month - 1]} ${period.year}:\n\n${lines}\n\nGenerate the Base Join anyway with these folders marked as missing?`
+          )
+          if (!confirmed) {
+            setError(`Generation cancelled for ${monthNames[period.month - 1]} ${period.year} — complete the missing folders first.`)
+            return
+          }
+          setBusy(null)
+          await generateSelectedBaseAndFinals(true)
+          return
+        }
         if (!baseResponse.ok) throw new Error(`${monthNames[period.month - 1]} ${period.year}: ${baseResult.error || 'Base Join generation failed.'}`)
         const finalsResponse = await fetch('/api/smartcomprovante/actions', {
           method: 'POST',
@@ -738,6 +833,234 @@ export function PrototypeDashboard() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Action failed.')
     } finally { setBusy(null) }
+  }
+
+  const confirmClassification = async () => {
+    if (!clusterResult || !workspace) return
+    // Collect all items from clusters 2-13 that have a confirmed period
+    const items = clusterResult.clusters
+      .filter((c) => c.folderNumber != null && c.folderNumber >= 2 && c.folderNumber <= 13)
+      .flatMap((c) =>
+        c.items
+          .filter((item) => item.targetYear && item.targetMonth && item.sourceHash)
+          .map((item) => ({
+            sourceHash: item.sourceHash!,
+            filename: item.filename,
+            folderNumber: c.folderNumber!,
+            folderCode: c.code,
+            targetYear: item.targetYear!,
+            targetMonth: item.targetMonth!,
+            confidence: item.confidence ?? 0.9,
+          }))
+      )
+    // Items without a confirmed period: default to workspace year/month
+    const unperiodedItems = clusterResult.clusters
+      .filter((c) => c.folderNumber != null && c.folderNumber >= 2 && c.folderNumber <= 13)
+      .flatMap((c) =>
+        c.items
+          .filter((item) => (!item.targetYear || !item.targetMonth) && item.sourceHash)
+          .map((item) => ({
+            sourceHash: item.sourceHash!,
+            filename: item.filename,
+            folderNumber: c.folderNumber!,
+            folderCode: c.code,
+            targetYear: workspace.year,
+            targetMonth: workspace.month,
+            confidence: item.confidence ?? 0.9,
+          }))
+      )
+    const allItems = [...items, ...unperiodedItems]
+    if (!allItems.length) return
+    setConfirmClassificationStatus('saving')
+    try {
+      const res = await fetch('/api/smartcomprovante/actions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'confirm-classification', companyId: workspace.company.id, projectId: selectedProjectId, year: workspace.year, month: workspace.month, classificationItems: allItems }),
+      })
+      if (!res.ok) throw new Error('Failed')
+      setConfirmClassificationStatus('saved')
+      setTimeout(() => setConfirmClassificationStatus('idle'), 3000)
+      await load()
+    } catch {
+      setConfirmClassificationStatus('error')
+      setTimeout(() => setConfirmClassificationStatus('idle'), 4000)
+    }
+  }
+
+  const openPdfPreview = (filename: string, setFn: (f: string | null) => void, current: string | null) => {
+    setFn(current === filename ? null : filename)
+  }
+
+  const removeClusterFile = async (item: ClusterItem, clusterKey: string) => {
+    if (!workspace) return
+    const confirmed = window.confirm(`Remove this file from the folder board?\n\n${item.filename}\n\nThis also deletes the stored upload copy when available.`)
+    if (!confirmed) return
+
+    const targetYear = item.targetYear || workspace.year
+    const targetMonth = item.targetMonth || workspace.month
+    setError('')
+    setClusterResult((current) => {
+      if (!current) return current
+      const clusters = current.clusters
+        .map((cluster) => cluster.key !== clusterKey ? cluster : {
+          ...cluster,
+          items: cluster.items.filter((clusterItem) => clusterItem.sourceHash !== item.sourceHash),
+        })
+        .filter((cluster) => cluster.items.length > 0 || cluster.folderNumber !== null)
+      const totalItems = clusters.reduce((sum, cluster) => sum + cluster.items.length, 0)
+      const outliers = clusters.find((cluster) => cluster.key === 'OUTLIERS')?.items.length || 0
+      return { ...current, clusters, totalItems, groupedItems: Math.max(0, current.groupedItems - 1), outliers }
+    })
+    if (reviewItem?.item.sourceHash === item.sourceHash) setReviewItem(null)
+
+    try {
+      const response = await fetch('/api/smartcomprovante/remove-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          companyId: workspace.company.id,
+          projectId: selectedProjectId,
+          year: targetYear,
+          month: targetMonth,
+          sourceHash: item.sourceHash,
+        }),
+      })
+      const result = await response.json() as { error?: string }
+      if (!response.ok) throw new Error(result.error || 'Could not remove file.')
+      void refreshCustomerUploads(workspace.company.id)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not remove file.')
+      void refreshCustomerUploads(workspace.company.id)
+    }
+  }
+
+  const deleteGeneratedPdf = async (filename: string, kind: 'base' | 'final', year: number, month: number) => {
+    if (!workspace) return
+    const label = kind === 'base' ? 'Base Join' : 'Final Join'
+    const confirmed = window.confirm(`Delete this generated ${label} PDF?\n\n${filename}\n\nYou can regenerate it later if the source files are still available.`)
+    if (!confirmed) return
+
+    setError('')
+    if (kind === 'base') {
+      setBaseJoinLibrary((current) => current.filter((entry) => entry.filename !== filename))
+      if (selectedBaseJoinFilename === filename) setSelectedBaseJoinFilename(null)
+      if (previewBaseJoinFilename === filename) setPreviewBaseJoinFilename(null)
+      setPendingDownloads((current) => current.filter((entry) => entry.filename !== filename))
+    } else {
+      setFinalJoinLibrary((current) => current.filter((entry) => entry.filename !== filename))
+      if (previewFinalJoinFilename === filename) setPreviewFinalJoinFilename(null)
+    }
+
+    try {
+      const response = await fetch('/api/smartcomprovante/delete-export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename,
+          companyId: workspace.company.id,
+          projectId: selectedProjectId,
+          year,
+          month,
+        }),
+      })
+      const result = await response.json() as { error?: string }
+      if (!response.ok) throw new Error(result.error || `Could not delete ${label}.`)
+      if (kind === 'base') void loadBaseJoinLibrary(workspace.company.id)
+      else void loadFinalJoinLibrary(workspace.company.id)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : `Could not delete ${label}.`)
+      if (kind === 'base') void loadBaseJoinLibrary(workspace.company.id)
+      else void loadFinalJoinLibrary(workspace.company.id)
+    }
+  }
+
+  const loadBaseJoinLibrary = async (companyId: string) => {
+    try {
+      const res = await fetch(`/api/smartcomprovante/download?type=list&companyId=${encodeURIComponent(companyId)}`, { cache: 'no-store' })
+      if (!res.ok) return
+      const data = await res.json() as { entries: Array<{ filename: string; companyId: string; year: number; month: number; sizeBytes: number; generatedAt: string }> }
+      setBaseJoinLibrary(data.entries)
+    } catch { /* non-fatal */ }
+  }
+
+  const loadFinalJoinLibrary = async (companyId: string) => {
+    try {
+      const res = await fetch(`/api/smartcomprovante/download?type=list-finals&companyId=${encodeURIComponent(companyId)}`, { cache: 'no-store' })
+      if (!res.ok) return
+      const data = await res.json() as { entries: Array<{ filename: string; companyId: string; year: number; month: number; employeeCode: string; sizeBytes: number; generatedAt: string }> }
+      setFinalJoinLibrary(data.entries)
+    } catch { /* non-fatal */ }
+  }
+
+  const loadFolder1Payslips = async (companyId: string, year: number) => {
+    try {
+      const res = await fetch(`/api/smartcomprovante/folder1-payslips?companyId=${encodeURIComponent(companyId)}&year=${year}`, { cache: 'no-store' })
+      if (!res.ok) return
+      const data = await res.json() as { payslips: Array<{ filename: string; employeeName: string; uploadId: string; physicalFolderNumber: number; hash?: string }> }
+      setFolder1Payslips(data.payslips)
+      setFolder1Loaded(true)
+    } catch { /* non-fatal */ }
+  }
+
+  const generateBatchFinals = async () => {
+    if (!workspace || !selectedBaseJoinFilename || !selectedPayslipFilenames.length) return
+    const bjMatch = selectedBaseJoinFilename.match(/^BJ_(\d{4})(\d{2})_/)
+    const bjYear = bjMatch ? parseInt(bjMatch[1]) : workspace.year
+    const bjMonth = bjMatch ? parseInt(bjMatch[2]) : workspace.month
+    setBatchGeneratingFinals(true)
+    const toGenerate = folder1Payslips.filter((p) => selectedPayslipFilenames.includes(p.filename))
+    for (const payslip of toGenerate) {
+      await generateCustomFinal(payslip, selectedBaseJoinFilename, bjYear, bjMonth, true)
+    }
+    void loadFinalJoinLibrary(workspace.company.id)
+    setBatchGeneratingFinals(false)
+    setSelectedPayslipFilenames([])
+  }
+
+  const generateCustomFinal = async (payslip: { filename: string; employeeName: string; uploadId: string; physicalFolderNumber: number }, baseJoinFilename: string, year: number, month: number, skipAutoDownload = false) => {
+    if (!workspace) return
+    setGeneratingFinalFor(payslip.filename)
+    try {
+      const res = await fetch('/api/smartcomprovante/actions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'generate-custom-final',
+          companyId: workspace.company.id,
+          projectId: selectedProjectId,
+          year, month,
+          payslipUploadId: payslip.uploadId,
+          payslipPhysicalFolder: payslip.physicalFolderNumber,
+          payslipFilename: payslip.filename,
+          baseJoinFilename,
+        }),
+      })
+      const result = await res.json() as { ok?: boolean; filename?: string; error?: string }
+      if (!res.ok || !result.ok) throw new Error(result.error || 'Generation failed')
+      if (result.filename && !skipAutoDownload) {
+        const a = document.createElement('a')
+        a.href = `/api/smartcomprovante/download?type=file&filename=${encodeURIComponent(result.filename)}`
+        a.download = result.filename
+        document.body.appendChild(a); a.click(); document.body.removeChild(a)
+        setDownloadNotice(result.filename)
+      }
+      if (!skipAutoDownload) void loadFinalJoinLibrary(workspace.company.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Final Join generation failed.')
+    } finally {
+      setGeneratingFinalFor(null)
+    }
+  }
+
+  const downloadBaseJoin = (companyId: string, projectId: string, year: number, month: number, filename: string) => {
+    const resolvedFilename = filename || `BJ_${year}${String(month).padStart(2, '0')}_${companyId}.pdf`
+    const url = `/api/smartcomprovante/download?type=base&companyId=${encodeURIComponent(companyId)}&projectId=${encodeURIComponent(projectId)}&year=${year}&month=${month}`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = resolvedFilename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setDownloadNotice(resolvedFilename)
   }
 
   const generateAndDownloadBase = async () => {
@@ -2038,6 +2361,18 @@ export function PrototypeDashboard() {
 
         <div className="mx-auto max-w-[1500px] p-8">
           {error ? <div className="mb-5 flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"><span className="flex items-center gap-2"><AlertTriangle className="h-4 w-4" />{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div> : null}
+          {downloadNotice ? (
+            <div className="mb-5 flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+              <div className="flex items-center gap-3">
+                <Download className="h-4 w-4 shrink-0 text-emerald-700" />
+                <div>
+                  <p className="font-bold">File saved: <span className="font-mono font-normal">{downloadNotice}</span></p>
+                  <p className="mt-0.5 text-xs text-emerald-700">Check your browser&apos;s <strong>Downloads folder</strong> (usually <code>C:\Users\…\Downloads\</code> on Windows). You can also open it from the browser download bar at the bottom of the screen.</p>
+                </div>
+              </div>
+              <button onClick={() => setDownloadNotice(null)} className="ml-4 shrink-0 rounded-lg border border-emerald-200 bg-white p-1.5 hover:bg-emerald-100"><X className="h-4 w-4 text-slate-500" /></button>
+            </div>
+          ) : null}
 
           {appSide === 'customer' ? (
             <section className="space-y-6">
@@ -3147,18 +3482,22 @@ export function PrototypeDashboard() {
                 </div>
 
                 {([
-                  { label: 'Pay documents', folderNumbers: [1, 2, 3, 4], accent: 'text-emerald-800', sectionBg: 'bg-emerald-50/70 border-emerald-200', accentBar: 'bg-emerald-600', cardBg: 'bg-emerald-50/40 border-emerald-200' },
-                  { label: 'Meal allowance', folderNumbers: [5, 6], accent: 'text-amber-800', sectionBg: 'bg-amber-50/80 border-amber-200', accentBar: 'bg-amber-500', cardBg: 'bg-amber-50/50 border-amber-200' },
-                  { label: 'Social Security & IRS declarations', folderNumbers: [7, 8, 9, 10], accent: 'text-indigo-800', sectionBg: 'bg-indigo-50/80 border-indigo-200', accentBar: 'bg-indigo-600', cardBg: 'bg-indigo-50/50 border-indigo-200' },
-                  { label: 'Tax payments', folderNumbers: [11, 12, 13], accent: 'text-violet-800', sectionBg: 'bg-violet-50/80 border-violet-200', accentBar: 'bg-violet-600', cardBg: 'bg-violet-50/50 border-violet-200' },
-                ] as Array<{ label: string; folderNumbers: number[]; accent: string; sectionBg: string; accentBar: string; cardBg: string }>).map((section) => {
+                  { label: 'Step A — Payslips · Folder 01_RV (Recibos de Vencimento)', folderNumbers: [1], accent: 'text-teal-800', sectionBg: 'bg-teal-50/70 border-teal-300', accentBar: 'bg-teal-600', cardBg: 'bg-teal-50/40 border-teal-200', isFolderOne: true },
+                  { label: 'Step B — Evidence Documents · Folders 02–04', folderNumbers: [2, 3, 4], accent: 'text-emerald-800', sectionBg: 'bg-emerald-50/70 border-emerald-200', accentBar: 'bg-emerald-600', cardBg: 'bg-emerald-50/40 border-emerald-200', isFolderOne: false },
+                  { label: 'Meal allowance · Folders 05–06', folderNumbers: [5, 6], accent: 'text-amber-800', sectionBg: 'bg-amber-50/80 border-amber-200', accentBar: 'bg-amber-500', cardBg: 'bg-amber-50/50 border-amber-200', isFolderOne: false },
+                  { label: 'Social Security & IRS declarations · Folders 07–10', folderNumbers: [7, 8, 9, 10], accent: 'text-indigo-800', sectionBg: 'bg-indigo-50/80 border-indigo-200', accentBar: 'bg-indigo-600', cardBg: 'bg-indigo-50/50 border-indigo-200', isFolderOne: false },
+                  { label: 'Tax payments · Folders 11–13', folderNumbers: [11, 12, 13], accent: 'text-violet-800', sectionBg: 'bg-violet-50/80 border-violet-200', accentBar: 'bg-violet-600', cardBg: 'bg-violet-50/50 border-violet-200', isFolderOne: false },
+                ] as Array<{ label: string; folderNumbers: number[]; accent: string; sectionBg: string; accentBar: string; cardBg: string; isFolderOne: boolean }>).map((section) => {
                   const sectionFolders = workspace.folders.filter((folder) => section.folderNumbers.includes(folder.number))
                   if (!sectionFolders.length) return null
                   return (
                     <div key={section.label} className={`rounded-2xl border p-4 ${section.sectionBg}`}>
-                      <div className="mb-3 flex items-center justify-between gap-3">
+                      <div className="mb-3 flex flex-wrap items-center gap-3">
                         <p className={`text-xs font-extrabold uppercase tracking-widest ${section.accent}`}>{section.label}</p>
                         <span className={`h-1 flex-1 rounded-full ${section.accentBar}`} />
+                        {section.isFolderOne
+                          ? <span className="rounded-full bg-teal-700 px-2 py-0.5 text-[11px] font-bold text-white">Used in Final Join per employee</span>
+                          : <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-bold text-slate-600">Included in Base Join (shared)</span>}
                       </div>
                       <div className="grid gap-4 xl:grid-cols-2">
                 {sectionFolders.map((folder) => {
@@ -3207,14 +3546,31 @@ export function PrototypeDashboard() {
                                 const shortCode = buildDocumentDisplayCode(workspace.company.code || workspace.company.id, folder.number, item.targetMonth, index)
                                 const isLastPreviewed = lastInternalPreviewHash === item.sourceHash
                                 return (
-                                <button
-                                  key={`${folder.code}-${group.key}-${item.sourceHash}-${index}`}
-                                  onClick={() => navigateReviewTo(item, cluster?.key || folder.code, items)}
-                                  title={`${shortCode} · ${item.filename} · ${Math.round(item.confidence * 100)}%`}
-                                  className={`rounded-full border px-2 py-1 text-[11px] font-bold transition hover:border-teal-300 hover:bg-teal-50 ${isLastPreviewed ? 'ring-2 ring-teal-500 ring-offset-2 ring-offset-white shadow-sm' : ''} ${item.confidence >= 0.7 ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : item.confidence >= 0.5 ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-red-100 bg-red-50 text-red-700'}`}
-                                >
-                                  {shortCode}{isLastPreviewed ? ' · last' : ''}
-                                </button>
+                                  <span
+                                    key={`${folder.code}-${group.key}-${item.sourceHash}-${index}`}
+                                    title={`${shortCode} · ${item.filename} · ${Math.round(item.confidence * 100)}%`}
+                                    className={`inline-flex overflow-hidden rounded-full border text-[11px] font-bold transition ${isLastPreviewed ? 'ring-2 ring-teal-500 ring-offset-2 ring-offset-white shadow-sm' : ''} ${item.confidence >= 0.7 ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : item.confidence >= 0.5 ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-red-100 bg-red-50 text-red-700'}`}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => navigateReviewTo(item, cluster?.key || folder.code, items)}
+                                      className="px-2 py-1 transition hover:bg-white/70"
+                                    >
+                                      {shortCode}{isLastPreviewed ? ' · last' : ''}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.preventDefault()
+                                        event.stopPropagation()
+                                        void removeClusterFile(item, cluster?.key || folder.code)
+                                      }}
+                                      aria-label={`Remove ${item.filename}`}
+                                      className="border-l border-current/20 px-1.5 py-1 transition hover:bg-rose-100 hover:text-rose-700"
+                                    >
+                                      <X className="h-3 w-3" />
+                                    </button>
+                                  </span>
                                 )
                               })}
                               {group.items.length > 8 ? <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500">+{group.items.length - 8}</span> : null}
@@ -3360,39 +3716,8 @@ export function PrototypeDashboard() {
               </div>
             </section>
 
-            {(() => {
-              const archivedUploads = customerSubmittedUploads.filter((u) => u.status === 'archived')
-              if (!archivedUploads.length) return null
-              const byFolder = archivedUploads.reduce<Record<number, typeof archivedUploads>>((acc, u) => {
-                ;(acc[u.folderNumber] = acc[u.folderNumber] || []).push(u)
-                return acc
-              }, {})
-              return (
-                <section className="mb-6 rounded-2xl border border-emerald-100 bg-emerald-50 p-5 shadow-sm">
-                  <div className="mb-3 flex items-center gap-2">
-                    <span className="text-sm font-bold text-emerald-800">Past periods — archived</span>
-                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-700">{archivedUploads.reduce((t, u) => t + u.files.length, 0)} file(s)</span>
-                  </div>
-                  <div className="space-y-2">
-                    {Object.entries(byFolder).sort(([a], [b]) => Number(a) - Number(b)).map(([fn, uploads]) => {
-                      const fileCount = uploads.reduce((t, u) => t + u.files.length, 0)
-                      const lastArchived = uploads.map((u) => u.submittedAt).sort().at(-1)
-                      const folderInfo = workspace.folders.find((f) => f.number === Number(fn))
-                      return (
-                        <div key={fn} className="flex items-center justify-between rounded-lg border border-emerald-100 bg-white px-3 py-2 text-xs">
-                          <span className="font-semibold text-slate-700">{String(fn).padStart(2, '0')}_{folderInfo?.code ?? 'INBOX'} · {folderInfo?.label ?? 'Inbox'}</span>
-                          <div className="flex items-center gap-2 text-slate-500">
-                            <span>{fileCount} file(s)</span>
-                            {lastArchived ? <span className="text-slate-400">{new Date(lastArchived).toLocaleDateString()}</span> : null}
-                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-bold text-emerald-700">Included in output ✓</span>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </section>
-              )
-            })()}
+
+
 
             {clusterResult ? (
               <section id="generate-section" className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -3405,10 +3730,31 @@ export function PrototypeDashboard() {
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => setSelectedPeriodKeys(detectedPeriods.map((period) => period.key))} disabled={!detectedPeriods.length} className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Select all</button>
                     <button onClick={() => setSelectedPeriodKeys([])} disabled={!detectedPeriods.length} className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Clear</button>
+                    <button
+                      onClick={() => void confirmClassification()}
+                      disabled={confirmClassificationStatus === 'saving' || !clusterResult?.groupedItems}
+                      className={`inline-flex items-center gap-1.5 rounded-xl border px-4 py-2 text-xs font-bold transition disabled:opacity-50 ${confirmClassificationStatus === 'saved' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : confirmClassificationStatus === 'error' ? 'border-rose-300 bg-rose-50 text-rose-800' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}
+                    >
+                      {confirmClassificationStatus === 'saving' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : confirmClassificationStatus === 'saved' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <FolderCheck className="h-3.5 w-3.5" />}
+                      {confirmClassificationStatus === 'saving' ? 'Confirming...' : confirmClassificationStatus === 'saved' ? 'Classification confirmed' : confirmClassificationStatus === 'error' ? 'Error — retry' : 'Confirm classification'}
+                    </button>
                     <button onClick={() => void generateSelectedBaseJoins()} disabled={!selectedPeriods.length || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-[#176b61] px-4 py-2 text-xs font-bold text-white disabled:bg-slate-200 disabled:text-slate-500">{busy === 'generate-selected-base' ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileStack className="h-4 w-4" />}Generate Base Join ({selectedPeriods.length})</button>
-                    <button onClick={() => void generateSelectedBaseAndFinals()} disabled={!selectedPeriods.length || Boolean(busy)} className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold text-white disabled:bg-slate-200 disabled:text-slate-500">{busy === 'generate-selected-all' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}Generate Base + Finals ({selectedPeriods.length})</button>
                   </div>
                 </div>
+                {pendingDownloads.length > 0 ? (
+                  <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                    <p className="text-sm font-bold text-emerald-800">Base Joins ready — download your files:</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {pendingDownloads.map((dl) => (
+                        <button key={`${dl.year}-${dl.month}`} onClick={() => downloadBaseJoin(workspace.company.id, selectedProjectId, dl.year, dl.month, dl.filename)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-800">
+                          <FileStack className="h-3.5 w-3.5" />{monthNames[dl.month - 1]} {dl.year}
+                        </button>
+                      ))}
+                      <button onClick={() => setPendingDownloads([])} className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50">Dismiss</button>
+                    </div>
+                  </div>
+                ) : null}
+
                 {detectedPeriods.length ? (
                   <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6">
                     {detectedPeriods.map((period) => {
@@ -3435,6 +3781,391 @@ export function PrototypeDashboard() {
                 )}
               </section>
             ) : null}
+
+            {/* Folder 14 — Base Joins organized by month (cards are divs, no nested buttons) */}
+            <section className="mb-6 rounded-2xl border-2 border-emerald-200 bg-white p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-4 mb-4">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-700 text-white text-sm font-black">14</span>
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-emerald-700">Folder 14 — Base Join</p>
+                    <h2 className="mt-0.5 text-lg font-bold">Base Joins by month — folders 02–13 merged</h2>
+                  </div>
+                </div>
+                <button onClick={() => { void loadBaseJoinLibrary(workspace.company.id) }} className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50">
+                  <RefreshCw className="h-3.5 w-3.5" />Refresh
+                </button>
+              </div>
+              {baseJoinLibrary.filter((e) => e.companyId === workspace.company.id).length === 0 ? (
+                <p className="rounded-xl border border-dashed border-emerald-200 bg-emerald-50/40 px-4 py-6 text-center text-sm text-emerald-700">No Base Joins generated yet. Use <strong>Generate Base Join</strong> above to create one.</p>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {baseJoinLibrary.filter((e) => e.companyId === workspace.company.id).map((entry) => {
+                    const isSelected = selectedBaseJoinFilename === entry.filename
+                    const isCurrentPeriod = entry.year === workspace.year && entry.month === workspace.month
+                    return (
+                      <div key={entry.filename}
+                        className={`rounded-xl border transition ${isSelected ? 'border-teal-600 bg-teal-50 ring-2 ring-teal-100' : 'border-slate-200 bg-slate-50'}`}>
+                        {/* Top: click to select */}
+                        <div className="cursor-pointer p-4 hover:bg-black/[.03] rounded-t-xl"
+                          onClick={() => setSelectedBaseJoinFilename(isSelected ? null : entry.filename)}>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-slate-900">{monthNames[entry.month - 1]} {entry.year}</p>
+                              <p className="mt-0.5 truncate font-mono text-[10px] text-slate-400">{entry.filename}</p>
+                            </div>
+                            <div className="flex shrink-0 flex-col items-end gap-1">
+                              {isSelected && <span className="rounded-full bg-teal-600 px-2 py-0.5 text-[10px] font-black text-white">Selected</span>}
+                              {isCurrentPeriod && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">Current</span>}
+                            </div>
+                          </div>
+                          <p className="mt-2 text-[11px] text-slate-400">{(entry.sizeBytes / 1024).toFixed(0)} KB · {new Date(entry.generatedAt).toLocaleDateString()}</p>
+                          <p className="mt-1 text-[10px] text-slate-400">{isSelected ? '✓ Selected for Final Join' : 'Click to select for Final Join'}</p>
+                        </div>
+                        {/* Bottom: action buttons — completely separate from the select area */}
+                        <div className="flex border-t border-slate-200">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              openPdfPreview(entry.filename, setPreviewBaseJoinFilename, previewBaseJoinFilename)
+                            }}
+                            className={`flex flex-1 items-center justify-center gap-1.5 py-2 text-[11px] font-bold transition rounded-bl-xl ${previewBaseJoinFilename === entry.filename ? 'bg-slate-800 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                            <Search className="h-3 w-3" />{previewBaseJoinFilename === entry.filename ? 'Close' : 'Preview'}
+                          </button>
+                          <div className="w-px bg-slate-200" />
+                          <a
+                            href={`/api/smartcomprovante/download?type=file&filename=${encodeURIComponent(entry.filename)}`}
+                            download={entry.filename}
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex flex-1 items-center justify-center gap-1.5 rounded-br-xl bg-white py-2 text-[11px] font-bold text-slate-600 hover:bg-slate-50">
+                            <Download className="h-3 w-3" />Download
+                          </a>
+                          <div className="w-px bg-slate-200" />
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              void deleteGeneratedPdf(entry.filename, 'base', entry.year, entry.month)
+                            }}
+                            aria-label={`Delete ${entry.filename}`}
+                            className="flex w-10 items-center justify-center rounded-br-xl bg-white py-2 text-rose-500 transition hover:bg-rose-50 hover:text-rose-700"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              {selectedBaseJoinFilename && (
+                <div className="mt-4 flex items-center gap-3 rounded-xl border border-teal-200 bg-teal-50 px-4 py-3">
+                  <FileStack className="h-5 w-5 shrink-0 text-teal-700" />
+                  <p className="flex-1 text-sm font-bold text-teal-900">Selected for Final Join: <span className="font-mono font-normal">{selectedBaseJoinFilename}</span></p>
+                  <button onClick={() => setSelectedBaseJoinFilename(null)} className="rounded-lg border border-teal-200 bg-white p-1.5 hover:bg-slate-50"><X className="h-3.5 w-3.5 text-slate-500" /></button>
+                </div>
+              )}
+
+              {previewBaseJoinFilename && (
+                <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
+                  <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <FileStack className="h-4 w-4 text-emerald-700" />
+                      <p className="text-xs font-bold text-slate-700">{previewBaseJoinFilename}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <a href={`/api/smartcomprovante/download?type=file&filename=${encodeURIComponent(previewBaseJoinFilename)}`} download={previewBaseJoinFilename}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50">
+                        <Download className="h-3.5 w-3.5" />Download
+                      </a>
+                      {(() => {
+                        const entry = baseJoinLibrary.find((item) => item.filename === previewBaseJoinFilename)
+                        return entry ? (
+                          <button
+                            type="button"
+                            onClick={() => void deleteGeneratedPdf(entry.filename, 'base', entry.year, entry.month)}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50"
+                          >
+                            <X className="h-3.5 w-3.5" />Delete
+                          </button>
+                        ) : null
+                      })()}
+                      <button onClick={() => setPreviewBaseJoinFilename(null)} className="rounded-lg p-1.5 hover:bg-slate-100"><X className="h-4 w-4 text-slate-500" /></button>
+                    </div>
+                  </div>
+                  <PdfDateMarker
+                    key={previewBaseJoinFilename}
+                    sourceUrl={`/api/smartcomprovante/download?type=file&inline=1&filename=${encodeURIComponent(previewBaseJoinFilename)}`}
+                    mode="preview"
+                    picked={null}
+                    onPick={() => undefined}
+                  />
+                </div>
+              )}
+            </section>
+
+            {/* Folder 15 — Final Join per employee per month */}
+            <section className="mb-6 rounded-2xl border-2 border-violet-200 bg-white p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-4 mb-5">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-700 text-white text-sm font-black">15</span>
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-violet-700">Folder 15 — Final Comprovante</p>
+                    <h2 className="mt-0.5 text-lg font-bold">Final Join per employee — payslip + Base Join</h2>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => void loadFolder1Payslips(workspace.company.id, workspace.year)} disabled={!selectedBaseJoinFilename}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-violet-700 px-3 py-2 text-xs font-bold text-white hover:bg-violet-800 disabled:bg-slate-200 disabled:text-slate-500">
+                    <Search className="h-3.5 w-3.5" />
+                    {folder1Loaded ? 'Re-read names' : 'Read names from Folder 1'}
+                  </button>
+                  <button onClick={() => void loadFinalJoinLibrary(workspace.company.id)} disabled={!selectedBaseJoinFilename}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                    <RefreshCw className="h-3.5 w-3.5" />Refresh library
+                  </button>
+                </div>
+              </div>
+
+              {/* Step 1: Base Join selection reminder */}
+              {!selectedBaseJoinFilename ? (
+                <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  <strong>Step 1:</strong> Select a Base Join from Folder 14 above to use as the shared evidence for this month.
+                </div>
+              ) : (
+                <div className="mb-5 flex items-center gap-3 rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm">
+                  <Check className="h-4 w-4 shrink-0 text-teal-700" />
+                  <p className="text-teal-800"><strong>Base Join selected:</strong> <span className="font-mono text-xs">{selectedBaseJoinFilename}</span></p>
+                </div>
+              )}
+
+              {selectedBaseJoinFilename ? (
+                <>
+              {/* Step 2: Employees from Folder 1 */}
+              <p className="mb-3 text-sm font-bold text-slate-700">Step 2 — Payslips from Folder 01_RV{folder1Loaded ? ` (${folder1Payslips.length} detected)` : ''}</p>
+
+              {!folder1Loaded ? (
+                <p className="rounded-xl border border-dashed border-violet-200 bg-violet-50/40 px-4 py-8 text-center text-sm text-violet-700">
+                  Click <strong>Read names from Folder 1</strong> above to detect employees from uploaded payslips (01_RV_ files).
+                </p>
+              ) : folder1Payslips.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-violet-200 bg-violet-50/40 px-4 py-6 text-center text-sm text-violet-700">No payslips detected in Folder 01_RV. Upload files with <strong>01_RV_</strong> prefix or directly to folder 1.</p>
+              ) : (
+                <>
+                  {/* Batch toolbar */}
+                  <div className="mb-3 flex items-center gap-3 rounded-xl border border-violet-100 bg-violet-50/50 px-4 py-2.5">
+                    <input
+                      type="checkbox"
+                      checked={selectedPayslipFilenames.length === folder1Payslips.length}
+                      ref={(el) => { if (el) el.indeterminate = selectedPayslipFilenames.length > 0 && selectedPayslipFilenames.length < folder1Payslips.length }}
+                      onChange={(e) => setSelectedPayslipFilenames(e.target.checked ? folder1Payslips.map((p) => p.filename) : [])}
+                      className="h-4 w-4 rounded accent-violet-700"
+                    />
+                    <span className="flex-1 text-xs font-bold text-slate-600">
+                      {selectedPayslipFilenames.length > 0 ? `${selectedPayslipFilenames.length} of ${folder1Payslips.length} selected` : 'Select employees to generate'}
+                    </span>
+                    <button
+                      disabled={!selectedPayslipFilenames.length || !selectedBaseJoinFilename || batchGeneratingFinals}
+                      onClick={() => void generateBatchFinals()}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-violet-700 px-4 py-2 text-xs font-bold text-white hover:bg-violet-800 disabled:opacity-40"
+                    >
+                      {batchGeneratingFinals ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
+                      Generate for selected ({selectedPayslipFilenames.length})
+                    </button>
+                  </div>
+
+                  <div className="overflow-hidden rounded-xl border border-slate-200">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-slate-100 bg-slate-50">
+                          <th className="px-3 py-2.5 w-8" />
+                          <th className="px-4 py-2.5 text-left text-xs font-bold text-slate-500">Employee / File</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-bold text-slate-500">Period</th>
+                          <th className="px-4 py-2.5 text-left text-xs font-bold text-slate-500">Generated</th>
+                          <th className="px-4 py-2.5 text-right text-xs font-bold text-slate-500">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {folder1Payslips.map((payslip) => {
+                          const safeCode = payslip.filename.replace(/\.pdf$/i, '').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 40)
+                          const existingFinals = finalJoinLibrary.filter((f) => f.companyId === workspace.company.id && f.employeeCode === safeCode)
+                          const isGenerating = generatingFinalFor === payslip.filename
+                          const isChecked = selectedPayslipFilenames.includes(payslip.filename)
+                          return (
+                            <tr key={payslip.filename} className={`hover:bg-slate-50 ${isChecked ? 'bg-violet-50/40' : ''}`}>
+                              <td className="px-3 py-3">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={(e) => setSelectedPayslipFilenames((prev) =>
+                                    e.target.checked ? [...prev, payslip.filename] : prev.filter((f) => f !== payslip.filename)
+                                  )}
+                                  className="h-4 w-4 rounded accent-violet-700"
+                                />
+                              </td>
+                              <td className="px-4 py-3">
+                                <p className="font-semibold text-slate-900">{payslip.employeeName}</p>
+                                <p className="font-mono text-[11px] text-slate-400 truncate max-w-[220px]">{payslip.filename}</p>
+                              </td>
+                              <td className="px-4 py-3">
+                                {selectedBaseJoinFilename ? (() => {
+                                  const bjMatch = selectedBaseJoinFilename.match(/^BJ_(\d{4})(\d{2})_/)
+                                  return bjMatch ? <span className="rounded-full bg-teal-50 px-2 py-1 text-xs font-bold text-teal-700">{monthNames[parseInt(bjMatch[2]) - 1]} {bjMatch[1]}</span> : <span className="text-xs text-slate-400">—</span>
+                                })() : <span className="text-xs text-slate-400">Select Base Join first</span>}
+                              </td>
+                              <td className="px-4 py-3">
+                                {existingFinals.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {existingFinals.map((f) => (
+                                      <span key={f.filename} className="inline-flex overflow-hidden rounded-lg border border-violet-100 bg-violet-50 text-[11px] font-bold text-violet-700">
+                                        <button
+                                          type="button"
+                                          onClick={() => openPdfPreview(f.filename, setPreviewFinalJoinFilename, previewFinalJoinFilename)}
+                                          className={`inline-flex items-center gap-1 px-2 py-1 hover:bg-violet-100 ${previewFinalJoinFilename === f.filename ? 'bg-violet-700 text-white' : ''}`}
+                                        >
+                                          <Search className="h-3 w-3" />{monthNames[f.month - 1]} {f.year}
+                                        </button>
+                                        <a href={`/api/smartcomprovante/download?type=file&filename=${encodeURIComponent(f.filename)}`} download={f.filename}
+                                          className="inline-flex items-center border-l border-violet-200 px-1.5 py-1 hover:bg-violet-100" aria-label={`Download ${f.filename}`}>
+                                          <Download className="h-3 w-3" />
+                                        </a>
+                                        <button
+                                          type="button"
+                                          onClick={() => void deleteGeneratedPdf(f.filename, 'final', f.year, f.month)}
+                                          className="inline-flex items-center border-l border-violet-200 px-1.5 py-1 text-rose-500 hover:bg-rose-50 hover:text-rose-700"
+                                          aria-label={`Delete ${f.filename}`}
+                                        >
+                                          <X className="h-3 w-3" />
+                                        </button>
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : <span className="text-xs text-slate-400">Not generated yet</span>}
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                {selectedBaseJoinFilename ? (() => {
+                                  const bjMatch = selectedBaseJoinFilename.match(/^BJ_(\d{4})(\d{2})_/)
+                                  const bjYear = bjMatch ? parseInt(bjMatch[1]) : workspace.year
+                                  const bjMonth = bjMatch ? parseInt(bjMatch[2]) : workspace.month
+                                  return (
+                                    <button
+                                      disabled={isGenerating || batchGeneratingFinals}
+                                      onClick={() => void generateCustomFinal(payslip, selectedBaseJoinFilename, bjYear, bjMonth)}
+                                      className="inline-flex items-center gap-1.5 rounded-xl bg-violet-700 px-3 py-2 text-xs font-bold text-white hover:bg-violet-800 disabled:opacity-40"
+                                    >
+                                      {isGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
+                                      {isGenerating ? 'Generating...' : 'Generate'}
+                                    </button>
+                                  )
+                                })() : (
+                                  <span className="text-xs text-slate-400">Select Base Join</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+
+              <div className="mt-5 rounded-xl border border-violet-100 bg-violet-50/40 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-bold text-violet-950">Generated Final Joins by month</p>
+                    <p className="mt-0.5 text-xs text-violet-700">Previously generated comprovantes stay grouped here for preview or download.</p>
+                  </div>
+                  <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-violet-700">{finalJoinLibrary.filter((entry) => entry.companyId === workspace.company.id).length} file(s)</span>
+                </div>
+                {finalJoinMonthGroups.length ? (
+                  <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    {finalJoinMonthGroups.map((group) => (
+                      <div key={group.key} className="rounded-xl border border-violet-100 bg-white p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-black uppercase tracking-wide text-violet-700">{group.label}</p>
+                          <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-bold text-violet-700">{group.items.length} file(s)</span>
+                        </div>
+                        <div className="mt-2 space-y-1.5">
+                          {group.items.map((entry) => (
+                            <div key={entry.filename} className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50 px-2 py-1.5">
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-[11px] font-bold text-slate-700">{entry.employeeCode}</p>
+                                <p className="truncate font-mono text-[10px] text-slate-400">{entry.filename}</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openPdfPreview(entry.filename, setPreviewFinalJoinFilename, previewFinalJoinFilename)}
+                                className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-bold ${previewFinalJoinFilename === entry.filename ? 'bg-violet-700 text-white' : 'bg-white text-violet-700 hover:bg-violet-50'}`}
+                              >
+                                <Search className="h-3 w-3" />{previewFinalJoinFilename === entry.filename ? 'Close' : 'Preview'}
+                              </button>
+                              <a href={`/api/smartcomprovante/download?type=file&filename=${encodeURIComponent(entry.filename)}`} download={entry.filename}
+                                className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-100">
+                                <Download className="h-3 w-3" />Download
+                              </a>
+                              <button
+                                type="button"
+                                onClick={() => void deleteGeneratedPdf(entry.filename, 'final', entry.year, entry.month)}
+                                className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-rose-600 hover:bg-rose-50"
+                                aria-label={`Delete ${entry.filename}`}
+                              >
+                                <X className="h-3 w-3" />Delete
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 rounded-lg border border-dashed border-violet-200 bg-white/70 p-3 text-xs text-violet-700">No Final Joins generated yet.</p>
+                )}
+              </div>
+
+              {previewFinalJoinFilename && (
+                <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
+                  <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2.5">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <FileCheck2 className="h-4 w-4 shrink-0 text-violet-700" />
+                      <p className="truncate text-xs font-bold text-slate-700">{previewFinalJoinFilename}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <a href={`/api/smartcomprovante/download?type=file&filename=${encodeURIComponent(previewFinalJoinFilename)}`} download={previewFinalJoinFilename}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50">
+                        <Download className="h-3.5 w-3.5" />Download
+                      </a>
+                      {(() => {
+                        const entry = finalJoinLibrary.find((item) => item.filename === previewFinalJoinFilename)
+                        return entry ? (
+                          <button
+                            type="button"
+                            onClick={() => void deleteGeneratedPdf(entry.filename, 'final', entry.year, entry.month)}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50"
+                          >
+                            <X className="h-3.5 w-3.5" />Delete
+                          </button>
+                        ) : null
+                      })()}
+                      <button onClick={() => setPreviewFinalJoinFilename(null)} className="rounded-lg p-1.5 hover:bg-slate-100"><X className="h-4 w-4 text-slate-500" /></button>
+                    </div>
+                  </div>
+                  <PdfDateMarker
+                    key={previewFinalJoinFilename}
+                    sourceUrl={`/api/smartcomprovante/download?type=file&inline=1&filename=${encodeURIComponent(previewFinalJoinFilename)}`}
+                    mode="preview"
+                    picked={null}
+                    onPick={() => undefined}
+                  />
+                </div>
+              )}
+                </>
+              ) : null}
+
+            </section>
 
 
           </>)) : null}

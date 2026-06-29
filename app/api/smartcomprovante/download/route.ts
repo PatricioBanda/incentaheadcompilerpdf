@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { promises as fs } from 'fs'
 import path from 'path'
-import { getWorkspace } from '@/lib/smartcomprovante/store'
+import { getWorkspace, listBaseJoins, listFinalJoins } from '@/lib/smartcomprovante/store'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
@@ -10,7 +10,43 @@ const DATA_ROOT = process.env.SMARTCOMPROVANTE_DATA_DIR || path.join(process.cwd
 const EXPORTS_DIR = path.join(DATA_ROOT, 'exports')
 
 export async function GET(request: NextRequest) {
-  const type = request.nextUrl.searchParams.get('type') === 'final' ? 'final' : 'base'
+  const rawType = request.nextUrl.searchParams.get('type') ?? 'base'
+
+  if (rawType === 'list') {
+    const companyId = request.nextUrl.searchParams.get('companyId') || undefined
+    const entries = await listBaseJoins(companyId)
+    return NextResponse.json({ entries })
+  }
+
+  if (rawType === 'list-finals') {
+    const companyId = request.nextUrl.searchParams.get('companyId') || undefined
+    const entries = await listFinalJoins(companyId)
+    return NextResponse.json({ entries })
+  }
+
+  // Direct download or inline preview by filename
+  if (rawType === 'file') {
+    const filename = request.nextUrl.searchParams.get('filename') || ''
+    if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return NextResponse.json({ error: 'Invalid filename' }, { status: 400 })
+    }
+    const inline = request.nextUrl.searchParams.get('inline') === '1'
+    const filePath = path.join(EXPORTS_DIR, filename)
+    try {
+      const bytes = await fs.readFile(filePath)
+      return new NextResponse(bytes.buffer as ArrayBuffer, {
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': inline ? `inline; filename="${filename}"` : `attachment; filename="${filename}"`,
+          'Cache-Control': 'no-store',
+        },
+      })
+    } catch {
+      return NextResponse.json({ error: 'File not found' }, { status: 404 })
+    }
+  }
+
+  const type = rawType === 'final' ? 'final' : 'base'
   const employeeCode = request.nextUrl.searchParams.get('employee') || ''
   const companyId = request.nextUrl.searchParams.get('companyId') || 'agix'
   const projectId = request.nextUrl.searchParams.get('projectId') || 'project-inovacao-01'

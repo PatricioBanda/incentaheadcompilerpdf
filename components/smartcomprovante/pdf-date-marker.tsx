@@ -37,7 +37,7 @@ export function PdfDateMarker({ hash, file, sourceUrl, onPick, picked, mode = 'c
   sourceUrl?: string | null
   onPick: (mark: DateMark) => void
   picked: DateMark | null
-  mode?: 'click' | 'select'
+  mode?: 'click' | 'select' | 'preview'
   onSelect?: (text: string, mark?: DateMark) => void
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -244,7 +244,7 @@ export function PdfDateMarker({ hash, file, sourceUrl, onPick, picked, mode = 'c
     <div>
       <div className="mb-1.5 flex items-center justify-between">
         <p className="text-[11px] text-slate-500">
-          {mode === 'select' ? 'Drag to select the text that identifies the month.' : 'Click the date on the page.'}
+          {mode === 'preview' ? 'Preview only.' : mode === 'select' ? 'Drag to select the text that identifies the month.' : 'Click the date on the page.'}
         </p>
         {pageCount > 1 ? (
           <div className="flex items-center gap-1">

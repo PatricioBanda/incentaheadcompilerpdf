@@ -59,6 +59,38 @@ export async function archiveUploadsForPeriod(companyId: string, year: number): 
   )
 }
 
+export async function deleteUploadFileByHash(companyId: string, year: number, fileHash: string): Promise<number> {
+  if (!/^[0-9a-f]{64}$/i.test(fileHash)) return 0
+  const root = path.join(UPLOADS_ROOT, safeSegment(companyId), String(year))
+  const metadataFiles = await collectMetadataFiles(root)
+  let deleted = 0
+
+  for (const metadataPath of metadataFiles) {
+    try {
+      const upload = JSON.parse(await fs.readFile(metadataPath, 'utf8')) as CustomerUpload
+      const filesToDelete = upload.files.filter((file) => file.hash === fileHash)
+      if (!filesToDelete.length) continue
+
+      const uploadDir = path.dirname(metadataPath)
+      for (const file of filesToDelete) {
+        await fs.rm(path.join(uploadDir, safeSegment(file.name)), { force: true })
+        deleted += 1
+      }
+
+      upload.files = upload.files.filter((file) => file.hash !== fileHash)
+      if (upload.files.length === 0) {
+        await fs.rm(uploadDir, { recursive: true, force: true })
+      } else {
+        await fs.writeFile(metadataPath, `${JSON.stringify(upload, null, 2)}\n`, 'utf8')
+      }
+    } catch {
+      // Keep deleting other matches even if one stale metadata file is broken.
+    }
+  }
+
+  return deleted
+}
+
 export async function deleteUploadsForCompany(companyId: string): Promise<void> {
   await fs.rm(path.join(UPLOADS_ROOT, safeSegment(companyId)), { recursive: true, force: true })
 }

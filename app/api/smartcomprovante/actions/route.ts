@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { aggregateCompanyFingerprints, assembleBaseJoinPdf, assembleFinalJoinPdf, recordApprovedExample, resetPrototypeCompany, resetPrototypeDatabase, resetPrototypeWorkspace, updateWorkspace, validateBaseJoinStructure } from '@/lib/smartcomprovante/store'
+import { aggregateCompanyFingerprints, assembleBaseJoinPdf, assembleFinalJoinPdf, assembleCustomFinalJoinPdf, recordApprovedExample, resetPrototypeCompany, resetPrototypeDatabase, resetPrototypeWorkspace, updateWorkspace, validateBaseJoinStructure } from '@/lib/smartcomprovante/store'
 import { classifyPrototypeDocuments } from '@/lib/smartcomprovante/providers/gemini'
 import { RH_FOLDERS } from '@/lib/smartcomprovante/taxonomy'
-import { archiveUploadsForPeriod, deleteUploadsForCompany } from '@/lib/smartcomprovante/upload-store'
+import { archiveUploadsForPeriod, deleteUploadsForCompany, listUploads } from '@/lib/smartcomprovante/upload-store'
 import { routeLogger } from '@/lib/smartcomprovante/logger'
 
 export const runtime = 'nodejs'
@@ -10,14 +10,31 @@ export const maxDuration = 300
 
 const log = routeLogger('actions')
 
+type ClassificationItem = {
+  sourceHash: string
+  filename: string
+  folderNumber: number
+  folderCode: string
+  targetYear: number
+  targetMonth: number
+  confidence: number
+}
+
 type ActionBody = {
-  action: 'process-demo' | 'approve-review' | 'pass-review' | 'generate-base' | 'generate-finals' | 'reset-demo' | 'reset-system' | 'reset-company' | 'train-examples' | 'validate-base'
+  action: 'process-demo' | 'approve-review' | 'pass-review' | 'generate-base' | 'generate-finals' | 'generate-custom-final' | 'reset-demo' | 'reset-system' | 'reset-company' | 'train-examples' | 'validate-base' | 'confirm-classification'
   companyId?: string
   projectId?: string
   year?: number
   month?: number
   reviewId?: string
   destinationCode?: string
+  confirmMissing?: boolean
+  classificationItems?: ClassificationItem[]
+  // generate-custom-final
+  payslipUploadId?: string
+  payslipPhysicalFolder?: number
+  payslipFilename?: string
+  baseJoinFilename?: string
 }
 
 export async function POST(request: NextRequest) {
@@ -36,8 +53,150 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(result)
     }
     if (body.action === 'reset-demo') return NextResponse.json(await resetPrototypeWorkspace())
+
+    // confirm-classification: persists cluster assignments from the UI into workspace reviews + folder statuses.
+    // Items are grouped by their targetYear/targetMonth and applied to the corresponding workspace.
+    if (body.action === 'confirm-classification') {
+      const items = body.classificationItems ?? []
+      if (!items.length) return NextResponse.json({ ok: true, updated: 0 })
+
+      // Group items by period
+      const byPeriod = new Map<string, ClassificationItem[]>()
+      for (const item of items) {
+        const key = `${item.targetYear}:${item.targetMonth}`
+        if (!byPeriod.has(key)) byPeriod.set(key, [])
+        byPeriod.get(key)!.push(item)
+      }
+
+      let totalUpdated = 0
+      for (const [, periodItems] of byPeriod) {
+        const { targetYear: pYear, targetMonth: pMonth } = periodItems[0]
+        await updateWorkspace(companyId, pYear, pMonth, (draft) => {
+          if (!draft.approvedDocuments) draft.approvedDocuments = []
+          for (const item of periodItems) {
+            // Add/update workspace review so operators can see what was confirmed
+            const existing = draft.reviews.find((r) => r.sourceHash === item.sourceHash)
+            if (!existing) {
+              draft.reviews.push({
+                id: crypto.randomUUID(),
+                filename: item.filename,
+                proposedCode: item.folderCode,
+                proposedLabel: RH_FOLDERS.find((f) => f.number === item.folderNumber)?.label ?? item.folderCode,
+                confidence: item.confidence,
+                reason: 'Confirmed by operator via cluster view',
+                status: 'passed',
+                sourceHash: item.sourceHash,
+              })
+            } else if (existing.status === 'pending') {
+              existing.status = 'passed'
+              existing.proposedCode = item.folderCode
+            }
+
+            // Update folder documentCount + status
+            const folder = draft.folders.find((f) => f.number === item.folderNumber)
+            if (folder) {
+              folder.documentCount = Math.max(folder.documentCount, periodItems.filter((i) => i.folderNumber === item.folderNumber).length)
+              if (folder.status === 'missing') folder.status = 'review'
+            }
+
+            // Register in approvedDocuments so assembly can find the file immediately
+            if (!draft.approvedDocuments.some((d) => d.sourceHash === item.sourceHash)) {
+              draft.approvedDocuments.push({
+                id: crypto.randomUUID(),
+                sourceHash: item.sourceHash,
+                folderCode: item.folderCode,
+                folderNumber: item.folderNumber,
+                filename: item.filename,
+                pageCount: 1,
+                confidence: item.confidence,
+                approvedAt: now,
+                approvedBy: 'auto',
+              })
+            }
+          }
+          return draft
+        }, projectId)
+        totalUpdated += periodItems.length
+      }
+      return NextResponse.json({ ok: true, updated: totalUpdated, periods: byPeriod.size })
+    }
+
     let liveGeminiResult: Awaited<ReturnType<typeof classifyPrototypeDocuments>> = null
     if (body.action === 'process-demo') liveGeminiResult = await classifyPrototypeDocuments()
+
+    // Pre-flight for generate-base: sync folder statuses and approvedDocuments from all available sources
+    // so that the confirmation gate inside updateWorkspace sees correct folder states.
+    if (body.action === 'generate-base') {
+      const allUploads = await listUploads(companyId, year)
+
+      // Helper: infer folder number from filename prefix (e.g. "02_LC_..." → 2)
+      const inferFolderFromFilename = (filename: string): number | null => {
+        const match = filename.match(/^(\d{1,2})[_\-\s]/)
+        if (!match) return null
+        const n = parseInt(match[1], 10)
+        return n >= 1 && n <= 13 ? n : null
+      }
+
+      await updateWorkspace(companyId, year, month, (draft) => {
+        if (!draft.approvedDocuments) draft.approvedDocuments = []
+
+        // Source 1: workspace reviews (files classified from folder 0 via clustering)
+        for (const review of draft.reviews) {
+          if (!review.sourceHash) continue
+          const folder = draft.folders.find((f) => f.code === review.proposedCode && f.number >= 2 && f.number <= 13)
+          if (!folder) continue
+          if (folder.documentCount === 0) folder.documentCount = 1
+          if (!draft.approvedDocuments.some((d) => d.sourceHash === review.sourceHash)) {
+            draft.approvedDocuments.push({
+              id: crypto.randomUUID(), sourceHash: review.sourceHash,
+              folderCode: folder.code, folderNumber: folder.number,
+              filename: review.filename, pageCount: 1,
+              confidence: review.confidence, approvedAt: now, approvedBy: 'auto',
+            })
+          }
+        }
+
+        // Source 2: files uploaded directly to folders 2-13
+        const directUploads = allUploads.filter((u) => u.folderNumber >= 2 && u.folderNumber <= 13 && (u.month === month || u.month == null))
+        for (const upload of directUploads) {
+          const folderEntry = draft.folders.find((f) => f.number === upload.folderNumber)
+          if (folderEntry && folderEntry.documentCount === 0) folderEntry.documentCount = upload.files.length
+          for (const file of upload.files) {
+            if (!file.hash || draft.approvedDocuments.some((d) => d.sourceHash === file.hash)) continue
+            const folderDef = RH_FOLDERS.find((f) => f.number === upload.folderNumber)
+            draft.approvedDocuments.push({
+              id: crypto.randomUUID(), sourceHash: file.hash,
+              folderCode: folderDef?.code ?? 'UNKNOWN', folderNumber: upload.folderNumber,
+              filename: file.name, pageCount: 1,
+              confidence: 1.0, approvedAt: upload.submittedAt, approvedBy: 'auto',
+            })
+          }
+        }
+
+        // Source 3: folder-0 uploads — infer folder from filename prefix (e.g. "02_LC_..." → folder 2)
+        // This handles files uploaded in bulk to the inbox that were visually classified in the cluster UI
+        const inboxUploads = allUploads.filter((u) => u.folderNumber === 0 && u.status !== 'archived' && (u.month === month || u.month == null))
+        for (const upload of inboxUploads) {
+          for (const file of upload.files) {
+            if (!file.hash || draft.approvedDocuments.some((d) => d.sourceHash === file.hash)) continue
+            const inferredFolder = inferFolderFromFilename(file.name)
+            if (!inferredFolder || inferredFolder < 2 || inferredFolder > 13) continue
+            const folderDef = RH_FOLDERS.find((f) => f.number === inferredFolder)
+            if (!folderDef) continue
+            const folderEntry = draft.folders.find((f) => f.number === inferredFolder)
+            if (folderEntry && folderEntry.documentCount === 0) folderEntry.documentCount = 1
+            draft.approvedDocuments.push({
+              id: crypto.randomUUID(), sourceHash: file.hash,
+              folderCode: folderDef.code, folderNumber: inferredFolder,
+              filename: file.name, pageCount: 1,
+              confidence: 0.9, approvedAt: upload.submittedAt, approvedBy: 'auto',
+            })
+          }
+        }
+
+        return draft
+      }, projectId)
+    }
 
     const workspace = await updateWorkspace(companyId, year, month, (draft) => {
       if (!draft.approvedDocuments) draft.approvedDocuments = []
@@ -130,10 +289,20 @@ export async function POST(request: NextRequest) {
 
       if (body.action === 'generate-base') {
         if (unresolved) throw new Error('Base Join is still blocked by unresolved reviews.')
-        const confirmedMissing = draft.folders.slice(1).filter((folder) => !['approved', 'passed', 'confirmed_missing'].includes(folder.status))
-        const generatedWithWarnings = confirmedMissing.length > 0
+        // Folders are considered present if they have documents (any of: approved, passed, review, confirmed_missing)
+        // Only truly empty folders (missing/blocked with documentCount 0) require confirmation
+        const incompleteFolders = draft.folders
+          .filter((f) => f.number >= 2 && f.number <= 13)
+          .filter((f) => !['approved', 'passed', 'confirmed_missing', 'review'].includes(f.status) && f.documentCount === 0)
+        // Dry-run: if folders are genuinely empty and the operator has not yet confirmed, surface the list
+        if (incompleteFolders.length > 0 && !body.confirmMissing) {
+          const missingFolders = incompleteFolders.map((f) => ({ number: f.number, code: f.code, label: f.label }))
+          // Return a sentinel so the caller can show the confirmation dialog; updateWorkspace is abandoned via throw
+          throw Object.assign(new Error('REQUIRES_CONFIRMATION'), { requiresConfirmation: true, missingFolders })
+        }
+        const generatedWithWarnings = incompleteFolders.length > 0
         if (generatedWithWarnings) {
-          draft.folders = draft.folders.map((folder) => confirmedMissing.some((missing) => missing.number === folder.number)
+          draft.folders = draft.folders.map((folder) => incompleteFolders.some((missing) => missing.number === folder.number)
             ? { ...folder, status: 'confirmed_missing', documentCount: 0, approvedCount: 0, reviewCount: 0 }
             : folder)
         }
@@ -141,7 +310,7 @@ export async function POST(request: NextRequest) {
         draft.baseJoin = {
           status: 'current',
           filename: baseFilename,
-          includedFolders: 12 - confirmedMissing.length,
+          includedFolders: 12 - incompleteFolders.length,
           pageCount: null,
           updatedAt: now,
         }
@@ -152,7 +321,7 @@ export async function POST(request: NextRequest) {
         draft.activity.unshift({
           id: crypto.randomUUID(), at: now,
           text: generatedWithWarnings
-            ? `${baseFilename} prepared with ${confirmedMissing.length} folder(s) confirmed missing.`
+            ? `${baseFilename} prepared with ${incompleteFolders.length} folder(s) confirmed missing.`
             : `${baseFilename} generated and reconciled.`,
           tone: generatedWithWarnings ? 'warning' : 'success',
         })
@@ -276,8 +445,28 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // generate-custom-final: assembles payslip + chosen Base Join without needing workspace.employees
+    if (body.action === 'generate-custom-final') {
+      const { payslipUploadId, payslipFilename, baseJoinFilename } = body
+      const physicalFolder = body.payslipPhysicalFolder ?? 1
+      if (!payslipUploadId || !payslipFilename || !baseJoinFilename) {
+        return NextResponse.json({ error: 'payslipUploadId, payslipFilename and baseJoinFilename are required.' }, { status: 400 })
+      }
+      try {
+        const result = await assembleCustomFinalJoinPdf(companyId, year, month, { uploadId: payslipUploadId, physicalFolderNumber: physicalFolder, filename: payslipFilename }, baseJoinFilename)
+        return NextResponse.json({ ok: true, filename: result.filename, pageCount: result.pageCount })
+      } catch (err) {
+        return NextResponse.json({ error: err instanceof Error ? err.message : 'Assembly failed.' }, { status: 400 })
+      }
+    }
+
     return NextResponse.json(workspace)
   } catch (error) {
+    // Confirmation gate: surface missing folders so the UI can show a dialog
+    if (error instanceof Error && (error as Error & { requiresConfirmation?: boolean }).requiresConfirmation) {
+      const e = error as Error & { missingFolders?: Array<{ number: number; code: string; label: string }> }
+      return NextResponse.json({ requiresConfirmation: true, missingFolders: e.missingFolders ?? [] }, { status: 409 })
+    }
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Action failed.' }, { status: 400 })
   }
 }

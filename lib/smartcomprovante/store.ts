@@ -7,6 +7,8 @@ import { extractJoinSectionFingerprints } from './join-learning'
 import { processReferenceExample, aggregateAndValidate } from './learning-engine'
 import type { ApprovedDocument, BaseJoinValidation, CompanyDatabaseRecord, CompanyRecord, CompanyRules, EnrichedSectionFingerprint, JoinReference, MonthlyWorkspace, ProjectRecord, SectionEnrichment, SmartComprovanteDatabase, ClassifiedDocument, DocumentBatch, AuditManifest, ExportBundle, ProviderCallRecord, CacheEntry } from './types'
 import { isFirebaseConfigured, getFirebaseApp, firestoreGet, firestoreSet, firestoreDelete, firestoreList } from './firebase'
+import { listUploads } from './upload-store'
+import { logger } from './logger'
 
 // On Vercel set SMARTCOMPROVANTE_DATA_DIR=/tmp so ephemeral writes (cache, exports) go to writable /tmp.
 // Workspace state and rules use Firestore when FIREBASE_PROJECT_ID is set.
@@ -18,6 +20,8 @@ const CACHE_DIR = path.join(DATA_ROOT, 'cache')
 const CACHE_INDEX_DIR = path.join(CACHE_DIR, 'index')
 const CLASSIFICATION_CACHE_DIR = path.join(CACHE_DIR, 'classifications')
 const EXPORTS_DIR = path.join(DATA_ROOT, 'exports')
+const UPLOADS_ROOT = path.join(DATA_ROOT, 'uploads')
+const safeUploadSegment = (v: string) => v.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'item'
 
 type PrototypeState = {
   workspaces: Record<string, MonthlyWorkspace>
@@ -520,6 +524,11 @@ export const saveCachedClassification = async (companyId: string, sourceHash: st
   await fs.rename(temporary, cachePath)
 }
 
+export const deleteCachedClassification = async (companyId: string, sourceHash: string) => {
+  if (!/^[a-f0-9]{64}$/.test(sourceHash)) return
+  await fs.rm(path.join(CLASSIFICATION_CACHE_DIR, companyId, `${sourceHash}.json`), { force: true })
+}
+
 // Batch processing and document grouping
 export const createDocumentBatch = async (
   companyId: string,
@@ -818,6 +827,18 @@ export const createProject = async (input: { name: string; code: string }) => {
   return newProject
 }
 
+// Read a file directly from the uploads directory (fallback when cache index is unavailable)
+const readFileFromUploads = async (
+  companyId: string, year: number, folderNumber: number, uploadId: string, filename: string
+): Promise<Buffer | null> => {
+  try {
+    const filePath = path.join(UPLOADS_ROOT, safeUploadSegment(companyId), String(year), `folder-${folderNumber}`, uploadId, filename)
+    return await fs.readFile(filePath)
+  } catch {
+    return null
+  }
+}
+
 // Read a cached source file by its SHA-256 hash
 export const readCachedSourceFile = async (sourceHash: string): Promise<{ bytes: Buffer; mimeType: string }> => {
   if (!/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error('Invalid source hash.')
@@ -828,29 +849,248 @@ export const readCachedSourceFile = async (sourceHash: string): Promise<{ bytes:
   return { bytes: await fs.readFile(target), mimeType: index.mimeType }
 }
 
-// Assemble the Base Join PDF from all approved documents (folders 2–13)
+// Assemble the Base Join PDF from all documents in folders 2–13 for the given month.
+// Primary source: workspace.approvedDocuments (populated via review/LLM flow).
+// Fallback source: files uploaded directly to folder 2–13 in the uploads store.
 export const assembleBaseJoinPdf = async (projectId: string, companyId: string, year: number, month: number): Promise<{ buffer: Buffer; pageCount: number; filename: string }> => {
   const workspace = await getWorkspace(companyId, year, month, projectId)
-  const approvedDocs = (workspace.approvedDocuments || [])
+
+  // uploadFolderNumber is the physical folder on disk (may differ for inbox/folder-0 uploads where files are inferred to a logical folder)
+  type DocSource = { folderNumber: number; sourceHash: string; filename: string; uploadId?: string; uploadFilename?: string; uploadFolderNumber?: number }
+  let sources: DocSource[] = (workspace.approvedDocuments || [])
     .filter((doc) => doc.folderNumber >= 2 && doc.folderNumber <= 13)
     .sort((left, right) => left.folderNumber - right.folderNumber || left.approvedAt.localeCompare(right.approvedAt))
+    .map((doc) => ({ folderNumber: doc.folderNumber, sourceHash: doc.sourceHash, filename: doc.filename || doc.sourceHash }))
 
-  if (!approvedDocs.length) throw new Error('No approved documents found to assemble the Base Join.')
+  // Fallback: collect directly from uploads store when approvedDocuments is empty
+  if (sources.length === 0) {
+    const inferFolderFromFilename = (filename: string): number | null => {
+      const match = filename.match(/^(\d{1,2})[_\-\s]/)
+      if (!match) return null
+      const n = parseInt(match[1], 10)
+      return n >= 2 && n <= 13 ? n : null
+    }
 
-  const merged = await PDFDocument.create()
-  for (const doc of approvedDocs) {
-    try {
-      const { bytes } = await readCachedSourceFile(doc.sourceHash)
-      const source = await PDFDocument.load(bytes, { ignoreEncryption: true })
-      const pages = await merged.copyPages(source, source.getPageIndices())
-      pages.forEach((page) => merged.addPage(page))
-    } catch {
-      // Skip uncacheable files gracefully
+    const allUploads = await listUploads(companyId, year)
+
+    // Direct folder uploads (2-13)
+    const directUploads = allUploads
+      .filter((u) => u.folderNumber >= 2 && u.folderNumber <= 13 && (u.month === month || u.month == null))
+      .sort((a, b) => a.folderNumber - b.folderNumber || a.submittedAt.localeCompare(b.submittedAt))
+    for (const upload of directUploads) {
+      for (const file of upload.files) {
+        sources.push({ folderNumber: upload.folderNumber, uploadFolderNumber: upload.folderNumber, sourceHash: file.hash || '', filename: file.name, uploadId: upload.id, uploadFilename: file.name })
+      }
+    }
+
+    // Inbox (folder-0) uploads — infer logical folder from filename prefix (e.g. "02_LC_..." → folder 2)
+    // uploadFolderNumber stays 0 so readFileFromUploads looks in the right physical directory
+    if (sources.length === 0) {
+      const inboxUploads = allUploads.filter((u) => u.folderNumber === 0 && u.status !== 'archived' && (u.month === month || u.month == null))
+      const inferred: typeof sources = []
+      for (const upload of inboxUploads) {
+        for (const file of upload.files) {
+          const folderNumber = inferFolderFromFilename(file.name)
+          if (!folderNumber) continue
+          inferred.push({ folderNumber, uploadFolderNumber: 0, sourceHash: file.hash || '', filename: file.name, uploadId: upload.id, uploadFilename: file.name })
+        }
+      }
+      inferred.sort((a, b) => a.folderNumber - b.folderNumber)
+      sources.push(...inferred)
     }
   }
 
+  if (sources.length === 0) throw new Error('No documents found in folders 2–13 for this month. Upload the evidence documents first.')
+
+  const merged = await PDFDocument.create()
+  let skipped = 0
+  for (const doc of sources) {
+    let bytes: Buffer | null = null
+    // Try cache index first
+    if (doc.sourceHash) {
+      try {
+        const cached = await readCachedSourceFile(doc.sourceHash)
+        bytes = cached.bytes
+      } catch {
+        // Cache miss — try uploads directory fallback below
+      }
+    }
+    // Fallback: read directly from the uploads filesystem path using the physical upload folder (not the logical folder)
+    if (!bytes && doc.uploadId && doc.uploadFilename) {
+      bytes = await readFileFromUploads(companyId, year, doc.uploadFolderNumber ?? doc.folderNumber, doc.uploadId, doc.uploadFilename)
+    }
+    if (!bytes) {
+      logger.warn({ folderNumber: doc.folderNumber, filename: doc.filename }, 'Document skipped from Base Join — file not readable from cache or uploads')
+      skipped++
+      continue
+    }
+    try {
+      const source = await PDFDocument.load(bytes, { ignoreEncryption: true })
+      const pages = await merged.copyPages(source, source.getPageIndices())
+      pages.forEach((page) => merged.addPage(page))
+    } catch (pdfError) {
+      logger.warn({ folderNumber: doc.folderNumber, filename: doc.filename, error: String(pdfError) }, 'Document skipped from Base Join — PDF load failed')
+      skipped++
+    }
+  }
+
+  if (skipped > 0) logger.info({ skipped, total: sources.length }, 'Base Join assembled with some documents skipped')
+
   const buffer = Buffer.from(await merged.save())
   const filename = `BJ_${year}${String(month).padStart(2, '0')}_${companyId}.pdf`
+  await fs.mkdir(EXPORTS_DIR, { recursive: true })
+  await fs.writeFile(path.join(EXPORTS_DIR, filename), buffer)
+  return { buffer, pageCount: merged.getPageCount(), filename }
+}
+
+export interface BaseJoinEntry {
+  filename: string
+  companyId: string
+  year: number
+  month: number
+  sizeBytes: number
+  generatedAt: string
+}
+
+// Returns all Base Join PDFs stored in the exports directory, newest first.
+export const listBaseJoins = async (filterCompanyId?: string): Promise<BaseJoinEntry[]> => {
+  try {
+    const entries = await fs.readdir(EXPORTS_DIR, { withFileTypes: true })
+    const results: BaseJoinEntry[] = []
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.pdf')) continue
+      // Filename convention: BJ_{year}{month2}_{companyId}.pdf
+      const match = entry.name.match(/^BJ_(\d{4})(\d{2})_(.+)\.pdf$/)
+      if (!match) continue
+      const [, yearStr, monthStr, companyId] = match
+      if (filterCompanyId && companyId !== filterCompanyId) continue
+      try {
+        const stat = await fs.stat(path.join(EXPORTS_DIR, entry.name))
+        results.push({
+          filename: entry.name,
+          companyId,
+          year: parseInt(yearStr, 10),
+          month: parseInt(monthStr, 10),
+          sizeBytes: stat.size,
+          generatedAt: stat.mtime.toISOString(),
+        })
+      } catch { /* skip unreadable */ }
+    }
+    return results.sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
+  } catch {
+    return []
+  }
+}
+
+export interface FinalJoinEntry {
+  filename: string
+  companyId: string
+  year: number
+  month: number
+  employeeCode: string
+  sizeBytes: number
+  generatedAt: string
+}
+
+// Returns all Final Join PDFs stored in the exports directory, newest first.
+export const listFinalJoins = async (filterCompanyId?: string): Promise<FinalJoinEntry[]> => {
+  try {
+    const entries = await fs.readdir(EXPORTS_DIR, { withFileTypes: true })
+    const results: FinalJoinEntry[] = []
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.pdf')) continue
+      // Filename convention: CF_{year}{month2}_{employeeCode}_{companyId}.pdf
+      const match = entry.name.match(/^CF_(\d{4})(\d{2})_(.+)_([^_]+)\.pdf$/)
+      if (!match) continue
+      const [, yearStr, monthStr, employeeCode, companyId] = match
+      if (filterCompanyId && companyId !== filterCompanyId) continue
+      try {
+        const stat = await fs.stat(path.join(EXPORTS_DIR, entry.name))
+        results.push({ filename: entry.name, companyId, year: parseInt(yearStr, 10), month: parseInt(monthStr, 10), employeeCode, sizeBytes: stat.size, generatedAt: stat.mtime.toISOString() })
+      } catch { /* skip */ }
+    }
+    return results.sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
+  } catch { return [] }
+}
+
+export interface Folder1Payslip {
+  filename: string
+  employeeName: string
+  uploadId: string
+  physicalFolderNumber: number // actual folder on disk (may be 0 for inbox uploads)
+  hash?: string
+}
+
+// Detects payslip files from folder-1 uploads (and folder-0 inbox uploads with 01_RV_ prefix).
+// Extracts employee name from the filename.
+export const detectFolder1Payslips = async (companyId: string, year: number, month?: number | null): Promise<Folder1Payslip[]> => {
+  const allUploads = await listUploads(companyId, year)
+  const results: Folder1Payslip[] = []
+  const seen = new Set<string>()
+
+  const nameFromFilename = (filename: string): string => {
+    const base = filename.replace(/\.pdf$/i, '')
+    // Strip folder prefix: "01_RV_" or "01_"
+    const stripped = base.replace(/^\d{1,2}[_\-][A-Z]+[_\-]/i, '').replace(/^\d{1,2}[_\-]/i, '')
+    // Strip trailing date patterns like "_2026-06" or "_202606"
+    const noDate = stripped.replace(/[_\-]\d{4}[_\-]\d{2}$/, '').replace(/[_\-]\d{6}$/, '')
+    // Strip "_TESTE" suffix
+    const noTest = noDate.replace(/[_\-]TESTE$/i, '')
+    return noTest.replace(/_/g, ' ').trim() || filename
+  }
+
+  // Direct folder-1 uploads
+  for (const upload of allUploads) {
+    if (upload.folderNumber !== 1) continue
+    if (month != null && upload.month != null && upload.month !== month) continue
+    for (const file of upload.files) {
+      if (seen.has(file.name)) continue
+      seen.add(file.name)
+      results.push({ filename: file.name, employeeName: nameFromFilename(file.name), uploadId: upload.id, physicalFolderNumber: 1, hash: file.hash })
+    }
+  }
+
+  // Inbox (folder-0) uploads with 01_RV_ prefix
+  for (const upload of allUploads) {
+    if (upload.folderNumber !== 0 || upload.status === 'archived') continue
+    if (month != null && upload.month != null && upload.month !== month) continue
+    for (const file of upload.files) {
+      if (!file.name.match(/^01[_\-]/i)) continue
+      if (seen.has(file.name)) continue
+      seen.add(file.name)
+      results.push({ filename: file.name, employeeName: nameFromFilename(file.name), uploadId: upload.id, physicalFolderNumber: 0, hash: file.hash })
+    }
+  }
+
+  return results
+}
+
+// Assembles a Final Join from a specific payslip file + a specific Base Join file.
+// Does not require workspace.employees to be populated — works directly from uploads.
+export const assembleCustomFinalJoinPdf = async (
+  companyId: string, year: number, month: number,
+  payslip: { uploadId: string; physicalFolderNumber: number; filename: string },
+  baseJoinFilename: string,
+): Promise<{ buffer: Buffer; pageCount: number; filename: string }> => {
+  const payslipBytes = await readFileFromUploads(companyId, year, payslip.physicalFolderNumber, payslip.uploadId, payslip.filename)
+  if (!payslipBytes) throw new Error(`Payslip file not found on disk: ${payslip.filename}`)
+
+  const baseJoinPath = path.join(EXPORTS_DIR, baseJoinFilename)
+  let baseJoinBytes: Buffer
+  try { baseJoinBytes = await fs.readFile(baseJoinPath) } catch { throw new Error(`Base Join not found: ${baseJoinFilename}. Generate it first.`) }
+
+  const merged = await PDFDocument.create()
+  const payslipPdf = await PDFDocument.load(payslipBytes, { ignoreEncryption: true })
+  const baseJoinPdf = await PDFDocument.load(baseJoinBytes, { ignoreEncryption: true })
+  const payslipPages = await merged.copyPages(payslipPdf, payslipPdf.getPageIndices())
+  payslipPages.forEach((p) => merged.addPage(p))
+  const basePages = await merged.copyPages(baseJoinPdf, baseJoinPdf.getPageIndices())
+  basePages.forEach((p) => merged.addPage(p))
+
+  const buffer = Buffer.from(await merged.save())
+  // Derive a safe employee code from the payslip filename
+  const safeCode = payslip.filename.replace(/\.pdf$/i, '').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 40)
+  const filename = `CF_${year}${String(month).padStart(2, '0')}_${safeCode}_${companyId}.pdf`
   await fs.mkdir(EXPORTS_DIR, { recursive: true })
   await fs.writeFile(path.join(EXPORTS_DIR, filename), buffer)
   return { buffer, pageCount: merged.getPageCount(), filename }
@@ -978,12 +1218,52 @@ export const addLearnedMark = async (
   await writeCompanyRules(companyId, rules)
 }
 
-// Assemble a Final Join PDF: employee payslip (RV) + Base Join
+// Assemble a Final Join PDF: employee payslip (RV, folder 1) + Base Join (folders 2–13)
 export const assembleFinalJoinPdf = async (projectId: string, companyId: string, year: number, month: number, employeeCode: string): Promise<{ buffer: Buffer; pageCount: number; filename: string }> => {
   const workspace = await getWorkspace(companyId, year, month, projectId)
   const employee = workspace.employees.find((emp) => emp.employeeCode === employeeCode)
   if (!employee) throw new Error(`Employee ${employeeCode} not found in workspace.`)
-  if (!employee.payslipHash) throw new Error(`Employee ${employeeCode} has no linked payslip. Approve the payslip review first.`)
+
+  // Resolve payslip bytes: from approved review hash, or fallback to a single folder-1 upload for this month
+  let payslipBytes: Buffer | null = null
+  if (employee.payslipHash) {
+    try {
+      const cached = await readCachedSourceFile(employee.payslipHash)
+      payslipBytes = cached.bytes
+    } catch {
+      // Cache miss — will try uploads fallback
+    }
+  }
+  if (!payslipBytes) {
+    // Fallback: find folder 1 uploads for this month and try to match by employeeName in filename
+    const allUploads = await listUploads(companyId, year)
+    const folder1Uploads = allUploads.filter((u) => u.folderNumber === 1 && (u.month === month || u.month == null))
+    const nameLower = (employee.employeeName || '').toLowerCase().replace(/\s+/g, '')
+    let matched: { uploadId: string; filename: string } | null = null
+    for (const upload of folder1Uploads) {
+      for (const file of upload.files) {
+        if (nameLower && file.name.toLowerCase().replace(/\s+/g, '').includes(nameLower)) {
+          matched = { uploadId: upload.id, filename: file.name }
+          break
+        }
+      }
+      if (matched) break
+    }
+    // If no name match and there's exactly one folder-1 upload for this month, use it unambiguously
+    if (!matched && folder1Uploads.length === 1 && folder1Uploads[0].files.length === 1) {
+      matched = { uploadId: folder1Uploads[0].id, filename: folder1Uploads[0].files[0].name }
+    }
+    if (matched) {
+      payslipBytes = await readFileFromUploads(companyId, year, 1, matched.uploadId, matched.filename)
+    }
+  }
+  if (!payslipBytes) {
+    throw new Error(
+      `No payslip found for employee ${employeeCode}. ` +
+      `Either approve the folder 1 (RV) review for this employee, ` +
+      `or upload the payslip directly to folder 1 with the employee name in the filename.`
+    )
+  }
 
   const baseJoinFilename = `BJ_${year}${String(month).padStart(2, '0')}_${companyId}.pdf`
   const baseJoinPath = path.join(EXPORTS_DIR, baseJoinFilename)
@@ -995,7 +1275,6 @@ export const assembleFinalJoinPdf = async (projectId: string, companyId: string,
   }
 
   const merged = await PDFDocument.create()
-  const { bytes: payslipBytes } = await readCachedSourceFile(employee.payslipHash)
   const payslipPdf = await PDFDocument.load(payslipBytes, { ignoreEncryption: true })
   const payslipPages = await merged.copyPages(payslipPdf, payslipPdf.getPageIndices())
   payslipPages.forEach((page) => merged.addPage(page))
