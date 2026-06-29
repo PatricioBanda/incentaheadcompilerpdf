@@ -10,7 +10,9 @@
     "build:desktop": "next build",
     "start:desktop": "node .next/standalone/server.js",
     "electron": "npm run build:desktop && electron electron/main.js",
-    "test": "jest"
+    "test": "jest",
+    "test:e2e": "playwright test",
+    "test:e2e:report": "playwright show-report"
   },
   "dependencies": {
     "@dnd-kit/core": "latest",
