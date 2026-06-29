@@ -3,8 +3,10 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  output: 'standalone',
-  serverExternalPackages: ['pino', 'pino-pretty', 'firebase-admin'],
+  serverExternalPackages: ['pdfjs-dist', 'pdf-lib', 'pino', 'pino-pretty', 'firebase-admin'],
+  outputFileTracingIncludes: {
+    '**': ['./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'],
+  },
   outputFileTracingExcludes: {
     '*': [
       './.smartcomprovante-data/cache/**/*',

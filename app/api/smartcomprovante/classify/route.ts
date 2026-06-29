@@ -15,7 +15,7 @@ import { RH_FOLDERS } from '@/lib/smartcomprovante/taxonomy'
 import { routeLogger } from '@/lib/smartcomprovante/logger'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const log = routeLogger('classify')
 

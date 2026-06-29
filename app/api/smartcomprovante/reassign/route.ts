@@ -4,7 +4,7 @@ import { RH_FOLDERS } from '@/lib/smartcomprovante/taxonomy'
 import { updateUploadStatusByHash } from '@/lib/smartcomprovante/upload-store'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 type ReassignBody = {
   companyId: string

@@ -5,7 +5,7 @@ import { extractJoinSectionFingerprints } from '@/lib/smartcomprovante/join-lear
 import { inspectDocument } from '@/lib/smartcomprovante/document-intelligence'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 export async function POST(request: NextRequest) {
   try {

@@ -6,7 +6,7 @@ import { archiveUploadsForPeriod, deleteUploadsForCompany, listUploads } from '@
 import { routeLogger } from '@/lib/smartcomprovante/logger'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const log = routeLogger('actions')
 

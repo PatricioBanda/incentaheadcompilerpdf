@@ -8,7 +8,7 @@ import { updateUploadStatusByHash } from '@/lib/smartcomprovante/upload-store'
 import { SMARTCOMPROVANTE_DATA_ROOT } from '@/lib/smartcomprovante/paths'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const allowedTypes = new Set(['application/pdf', 'image/jpeg', 'image/png'])
 const MAX_FILE_SIZE = 15 * 1024 * 1024

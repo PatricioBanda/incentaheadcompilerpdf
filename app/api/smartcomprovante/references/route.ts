@@ -4,7 +4,7 @@ import type { JoinReference } from '@/lib/smartcomprovante/types'
 import { RH_FOLDERS } from '@/lib/smartcomprovante/taxonomy'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 export async function POST(request: NextRequest) {
   try {

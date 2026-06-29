@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createDocumentBatch, groupAndSortDocuments, getBatchStatistics, getWorkspace, updateWorkspace } from '@/lib/smartcomprovante/store'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 export async function POST(request: NextRequest) {
   try {

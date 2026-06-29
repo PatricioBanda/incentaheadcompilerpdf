@@ -3,7 +3,7 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
 import { generateAuditManifest, createExportBundle, getBatchStatistics } from '@/lib/smartcomprovante/store'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 export async function POST(request: NextRequest) {
   try {
