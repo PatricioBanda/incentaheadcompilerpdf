@@ -4,7 +4,7 @@ const nextConfig = {
     unoptimized: true,
   },
   output: 'standalone',
-  serverExternalPackages: ['pdfjs-dist', 'pino', 'pino-pretty', 'firebase-admin'],
+  serverExternalPackages: ['pino', 'pino-pretty', 'firebase-admin'],
   outputFileTracingExcludes: {
     '*': [
       './.smartcomprovante-data/cache/**/*',

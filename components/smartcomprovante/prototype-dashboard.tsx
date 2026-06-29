@@ -189,6 +189,21 @@ async function readApiJson<T = unknown>(response: Response, fallbackMessage: str
   }
 }
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, ms = 25000): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('Request timed out. Please retry.')
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export function PrototypeDashboard() {
   const [workspace, setWorkspace] = useState<MonthlyWorkspace | null>(null)
   const [databaseTree, setDatabaseTree] = useState<DatabaseTree | null>(null)
@@ -2127,7 +2142,7 @@ export function PrototypeDashboard() {
     setBusy('create-project')
     setError('')
     try {
-      const response = await fetch('/api/smartcomprovante/projects', {
+      const response = await fetchWithTimeout('/api/smartcomprovante/projects', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(projectForm),
       })
       const result = await readApiJson<ProjectRecord & { error?: string }>(response, 'Could not create project.')

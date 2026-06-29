@@ -249,7 +249,8 @@ export const inspectDocument = async (file: File): Promise<DocumentIntelligence>
   }
 
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-  const document = await pdfjs.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false }).promise
+  pdfjs.GlobalWorkerOptions.workerSrc = ''
+  const document = await pdfjs.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false, useWorkerFetch: false }).promise
   pageCount = pageCount || document.numPages
   const pages: string[] = []
   const profiles: PageProfile[] = []

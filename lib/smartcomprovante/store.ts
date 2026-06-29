@@ -806,6 +806,14 @@ export const recordCacheHit = async (
 
 // Project management
 export const getAllProjects = async (): Promise<ProjectRecord[]> => {
+  if (isFirebaseConfigured) {
+    const docs = await firestoreList<ProjectRecord>('projects')
+    return docs
+      .map((item) => item.data)
+      .filter((item): item is ProjectRecord => Boolean(item?.id && item?.code && item?.name))
+      .sort((left, right) => left.name.localeCompare(right.name))
+  }
+
   // Empty by default — the user creates their first project explicitly during onboarding.
   try {
     const data = JSON.parse(await fs.readFile(PROJECTS_PATH, 'utf8')) as ProjectRecord[]
@@ -822,6 +830,11 @@ export const createProject = async (input: { name: string; code: string }) => {
   const projects = await getAllProjects()
   if (projects.some((project) => project.id === id)) throw new Error(`Project with code "${input.code}" already exists.`)
   const newProject: ProjectRecord = { id, programId: DEFAULT_PROGRAM.id, code: input.code.toUpperCase(), name: input.name.trim() }
+  if (isFirebaseConfigured) {
+    await firestoreSet('projects', id, newProject)
+    return newProject
+  }
+
   projects.push(newProject)
   await fs.mkdir(DATA_ROOT, { recursive: true })
   await fs.writeFile(PROJECTS_PATH, JSON.stringify(projects, null, 2), 'utf8')
