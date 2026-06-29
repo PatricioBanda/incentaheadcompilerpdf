@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react'
-import * as pdfjs from 'pdfjs-dist'
 
 const getPdfWorkerSrc = () => (
   typeof window === 'undefined'
@@ -10,11 +9,13 @@ const getPdfWorkerSrc = () => (
     : new URL('/pdf.worker.min.mjs', window.location.origin).toString()
 )
 
-const configurePdfWorker = () => {
-  pdfjs.GlobalWorkerOptions.workerSrc = getPdfWorkerSrc()
-}
+type PdfJsModule = Awaited<typeof import('pdfjs-dist')>
 
-configurePdfWorker()
+const loadPdfJs = async (): Promise<PdfJsModule> => {
+  const pdfjs = await import('pdfjs-dist')
+  pdfjs.GlobalWorkerOptions.workerSrc = getPdfWorkerSrc()
+  return pdfjs
+}
 
 export type DateMark = { page: number; x: number; y: number; dateText: string; label: string; contextText: string }
 
@@ -42,6 +43,7 @@ export function PdfDateMarker({ hash, file, sourceUrl, onPick, picked, mode = 'c
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const overlayRef = useRef<HTMLDivElement | null>(null)
+  const pdfjsRef = useRef<PdfJsModule | null>(null)
   const pdfRef = useRef<unknown>(null)
   const pageDims = useRef<{ w: number; h: number }>({ w: 1, h: 1 })
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -71,13 +73,14 @@ export function PdfDateMarker({ hash, file, sourceUrl, onPick, picked, mode = 'c
           throw new Error('Preview source missing.')
         }
         if (cancelled) return
-        configurePdfWorker()
+        const pdfjs = await loadPdfJs()
         const doc = await pdfjs.getDocument({
           data: new Uint8Array(buf),
           isEvalSupported: false,
           useSystemFonts: true,
         }).promise
         if (cancelled) return
+        pdfjsRef.current = pdfjs
         pdfRef.current = doc
         setPageCount(doc.numPages)
         setStatus('ready')
@@ -89,12 +92,13 @@ export function PdfDateMarker({ hash, file, sourceUrl, onPick, picked, mode = 'c
   }, [hash, file, sourceUrl])
 
   useEffect(() => {
-    if (status !== 'ready' || !pdfRef.current) return
+    if (status !== 'ready' || !pdfRef.current || !pdfjsRef.current) return
     let cancelled = false
     void (async () => {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const doc = pdfRef.current as any
+        const pdfjs = pdfjsRef.current!
         const page = await doc.getPage(pageNum)
         const base = page.getViewport({ scale: 1 })
         pageDims.current = { w: base.width, h: base.height }
