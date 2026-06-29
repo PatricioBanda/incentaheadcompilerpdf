@@ -1828,13 +1828,6 @@ export function PrototypeDashboard() {
       setBusy(null)
       return
     }
-    stagedFolderFilesRef.current = selectedFiles
-    setStagedFolderContext({
-      companyId: workspace.company.id,
-      companyName: workspace.company.legalName,
-      projectId: selectedProjectId,
-      rulesVersion: workspace.company.rulesVersion,
-    })
     const persistedFiles = persistedUpload?.files || []
     const directItems: ClusterItem[] = selectedFiles.map((file, index) => ({
       filename: file.webkitRelativePath || file.name,
@@ -1942,7 +1935,15 @@ export function PrototypeDashboard() {
   }
 
   const runFolderGrouping = async () => {
-    const localFiles = stagedFolderFilesRef.current.length ? stagedFolderFilesRef.current : stagedFolderFiles
+    const canUseLocalFolder0 = Boolean(
+      workspace
+      && stagedFolderContext
+      && stagedFolderContext.companyId === workspace.company.id
+      && stagedFolderContext.projectId === selectedProjectId
+    )
+    const localFiles = canUseLocalFolder0
+      ? (stagedFolderFilesRef.current.length ? stagedFolderFilesRef.current : stagedFolderFiles)
+      : []
     if (localFiles.length) {
       await clusterStagedFolder()
       return
